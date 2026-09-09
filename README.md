@@ -1,2 +1,48 @@
-# Renting-Housing-Planning
-在找房子租的时候可以给你提供一个范围参考
+# Renting Assistance Service
+
+面向租房通勤决策的地图服务。用户选择公司、学校等目的地并设置出发时间和通勤预算后，系统计算公共交通可达站点、边界站点和可达区域，后续再结合住宅小区与房源信息提供筛选和排序。
+
+## 当前状态
+
+项目已完成 M1 地图基础能力，并实现 M2 的第一版可达性闭环。当前 Web 应用使用高德 JS API 和 Web 服务 API，可搜索工作地点、查询附近公共交通，并按方向、日期、时间和预算扫描候选站点，输出本轮最远可达站点。
+
+## 文档
+
+- [实现方案](docs/implementation-plan.md)
+- [项目目录规划](docs/project-structure.md)
+- [地图 API 接入清单](docs/map-api-checklist.md)
+- [高德地图接入方案](docs/amap-integration.md)
+- [开发路线图](ROADMAP.md)
+
+## 计划中的主要能力
+
+- 地点搜索、地理编码和地图选点
+- 附近公交、地铁、电车等站点查询
+- 站点线路、方向和运营信息展示
+- 基于出发时间与通勤预算计算公共交通可达范围
+- 展示最远站点、各方向边界站点和最佳路线
+- 在可达站点附近搜索住宅小区并进行通勤评分
+
+## 技术方向
+
+- Web：Next.js + React + TypeScript
+- API：Node.js + TypeScript（框架在初始化阶段确定）
+- Worker：异步执行批量路线和可达性计算
+- 数据：PostgreSQL/PostGIS + Redis
+- 工程：pnpm workspace + Docker
+
+技术栈可在接入地图 API 前调整；领域模型和地图适配接口不依赖具体供应商。
+
+## 本地运行
+
+高德配置保存在项目根目录的 `.env.local`。启动当前 Web 应用：
+
+```powershell
+cd apps/web
+npm install
+npm run dev
+```
+
+开发地址默认为 `http://localhost:3000/`。
+
+当前 Web 版本已实现高德地图加载、地点输入提示、地图定位、通勤条件设置、1.5 公里内公共交通站点与途经线路展示，以及基于 8 个方向抽样的公共交通可达性计算。当前算法是配额可控的 MVP 扫描，不是连续、完整的官方等时圈。
