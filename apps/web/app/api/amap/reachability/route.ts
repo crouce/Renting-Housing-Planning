@@ -32,6 +32,12 @@ type AccessStation = {
   allowedLines: string[];
 };
 
+type AccessStationWithWalk = AccessStation & {
+  walkingDistanceMeters: number;
+  walkingDurationSeconds: number;
+  remainingTransitSeconds: number;
+};
+
 type AMapPoi = {
   id?: string;
   parent?: string;
@@ -65,6 +71,18 @@ type TransitResponse = {
   };
 };
 
+type WalkingResponse = {
+  status: string;
+  info: string;
+  infocode: string;
+  route?: {
+    paths?: Array<{
+      distance?: string;
+      cost?: { duration?: string };
+    }>;
+  };
+};
+
 type CandidateStation = {
   id: string;
   logicalId: string;
@@ -78,6 +96,8 @@ type CandidateStation = {
 };
 
 type ReachableStation = CandidateStation & {
+  transitDurationSeconds: number;
+  transitDurationMinutes: number;
   durationSeconds: number;
   durationMinutes: number;
   straightLineMeters: number;
@@ -89,7 +109,18 @@ type ReachableStation = CandidateStation & {
     name: string;
     walkingDistanceMeters: number;
     walkingMinutes: number;
+    remainingTransitSeconds: number;
+    remainingTransitMinutes: number;
   };
+};
+
+type AccessStationBudget = {
+  id: string;
+  name: string;
+  walkingDistanceMeters: number;
+  walkingMinutes: number;
+  remainingTransitMinutes: number;
+  usable: boolean;
 };
 
 type ReachabilityResult = {
@@ -99,6 +130,7 @@ type ReachabilityResult = {
   candidateCount: number;
   routeCheckCount: number;
   selectedAccessStationCount: number;
+  accessStationBudgets: AccessStationBudget[];
   checkedCount: number;
   failedCount: number;
   reachableCount: number;
@@ -279,13 +311,63 @@ async function runThrottled<T, R>(
   return results;
 }
 
+async function planWalking(
+  anchor: NonNullable<ReachabilityRequest['anchor']>,
+  accessStation: AccessStation,
+  budgetSeconds: number,
+): Promise<AccessStationWithWalk | null> {
+  const params = new URLSearchParams({
+    origin: anchor.location!,
+    destination: accessStation.location,
+    origin_id: anchor.id!,
+    destination_id: accessStation.id,
+    alternative_route: '1',
+    show_fields: 'cost',
+  });
+
+  try {
+    const result = await amapRequest<WalkingResponse>(
+      '/v5/direction/walking',
+      params,
+      { retries: 0, timeoutMilliseconds: 8_000 },
+    );
+    const paths = (result.route?.paths ?? [])
+      .map((path) => ({
+        distanceMeters: Number(path.distance ?? 0),
+        durationSeconds: Number(path.cost?.duration ?? 0),
+      }))
+      .filter(
+        (path) =>
+          path.distanceMeters >= 0 &&
+          Number.isFinite(path.durationSeconds) &&
+          path.durationSeconds > 0,
+      )
+      .sort((left, right) => left.durationSeconds - right.durationSeconds);
+    const best = paths[0];
+    if (!best) return null;
+
+    return {
+      ...accessStation,
+      walkingDistanceMeters: Math.round(best.distanceMeters),
+      walkingDurationSeconds: Math.ceil(best.durationSeconds),
+      remainingTransitSeconds: Math.max(
+        0,
+        budgetSeconds - Math.ceil(best.durationSeconds),
+      ),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function planTransit(
   station: CandidateStation,
-  accessStation: AccessStation,
+  accessStation: AccessStationWithWalk,
   direction: CommuteDirection,
   departureDate: string,
   departureTime: string,
 ): Promise<{
+  transitDurationSeconds: number;
   durationSeconds: number;
   segmentCount: number;
   routeLines: string[];
@@ -315,8 +397,6 @@ async function planTransit(
       params,
       { retries: 0, timeoutMilliseconds: 8_000 },
     );
-    const walkingDistanceMeters = Math.max(0, accessStation.distanceMeters);
-    const walkingSeconds = Math.ceil(walkingDistanceMeters * 0.96);
     const routes = (result.route?.transits ?? [])
       .map((route) => {
         const routeLines = [
@@ -333,15 +413,23 @@ async function planTransit(
         );
         return {
           transitDurationSeconds: Number(route.cost?.duration ?? 0),
-          durationSeconds: Number(route.cost?.duration ?? 0) + walkingSeconds,
+          durationSeconds:
+            Number(route.cost?.duration ?? 0) +
+            accessStation.walkingDurationSeconds,
           segmentCount: route.segments?.length ?? 0,
           routeLines,
           matchedLines,
           accessStation: {
             id: accessStation.id,
             name: accessStation.name,
-            walkingDistanceMeters,
-            walkingMinutes: Math.ceil(walkingSeconds / 60),
+            walkingDistanceMeters: accessStation.walkingDistanceMeters,
+            walkingMinutes: Math.ceil(
+              accessStation.walkingDurationSeconds / 60,
+            ),
+            remainingTransitSeconds: accessStation.remainingTransitSeconds,
+            remainingTransitMinutes: Math.floor(
+              accessStation.remainingTransitSeconds / 60,
+            ),
           },
         };
       })
@@ -390,6 +478,7 @@ export async function POST(request: Request) {
     (direction !== 'to' && direction !== 'from') ||
     !datePattern.test(departureDate) ||
     !timePattern.test(departureTime) ||
+    requestedAccessStations.length < 1 ||
     requestedAccessStations.length > 3
   ) {
     return Response.json(
@@ -464,23 +553,50 @@ export async function POST(request: Request) {
     return Response.json({ ...cached.value, cached: true });
   }
 
-  const scanRadiusMeters = Math.min(8_000, Math.max(3_000, budgetMinutes * 80));
-  const sampleSearchRadius = Math.min(
-    4_000,
-    Math.max(2_000, Math.round(scanRadiusMeters * 0.28)),
-  );
-  const anchorCoordinates = parseLocation(anchor.location);
-  const sectorCenters = Array.from({ length: 8 }, (_, index) =>
-    formatLocation(
-      destinationPoint(anchorCoordinates, scanRadiusMeters, index * 45),
-    ),
-  );
-
   try {
-    const nearAnchor =
-      accessStations.length === 0
-        ? await findStationsAround(anchor.location, 1_800)
-        : [];
+    const walkingPlans = await runThrottled(
+      accessStations,
+      250,
+      async (accessStation) =>
+        planWalking(validatedAnchor, accessStation, budgetMinutes * 60),
+    );
+    const plannedAccessStations = walkingPlans.filter(
+      (station): station is AccessStationWithWalk => Boolean(station),
+    );
+    if (plannedAccessStations.length === 0) {
+      return Response.json(
+        {
+          error: {
+            code: 'NO_WALKING_ROUTE',
+            message: '无法取得所选接驳站点的步行路线。',
+          },
+        },
+        { status: 422 },
+      );
+    }
+    const activeAccessStations = plannedAccessStations.filter(
+      (station) => station.remainingTransitSeconds > 0,
+    );
+    const maxRemainingTransitMinutes = Math.max(
+      0,
+      ...plannedAccessStations.map((station) =>
+        Math.floor(station.remainingTransitSeconds / 60),
+      ),
+    );
+    const scanRadiusMeters = Math.min(
+      8_000,
+      Math.max(3_000, maxRemainingTransitMinutes * 80),
+    );
+    const sampleSearchRadius = Math.min(
+      4_000,
+      Math.max(2_000, Math.round(scanRadiusMeters * 0.28)),
+    );
+    const anchorCoordinates = parseLocation(anchor.location);
+    const sectorCenters = Array.from({ length: 8 }, (_, index) =>
+      formatLocation(
+        destinationPoint(anchorCoordinates, scanRadiusMeters, index * 45),
+      ),
+    );
     const sectors = await runThrottled(sectorCenters, 450, async (center) => {
       try {
         return await findStationsAround(center, sampleSearchRadius);
@@ -490,7 +606,6 @@ export async function POST(request: Request) {
     });
     const anchorCitycode =
       accessStations.find((station) => station.citycode)?.citycode ??
-      nearAnchor.find((station) => station.citycode)?.citycode ??
       sectors.flat().find((station) => station.citycode)?.citycode ??
       '';
     const rawCandidates = sectors.flatMap(selectSectorCandidates);
@@ -501,16 +616,9 @@ export async function POST(request: Request) {
       }
       if (candidateMap.size >= 8) break;
     }
-    const fallbackAccessStation: AccessStation = {
-      id: validatedAnchor.id,
-      name: validatedAnchor.name,
-      location: validatedAnchor.location,
-      citycode: anchorCitycode,
-      distanceMeters: 0,
-      allowedLines: [],
-    };
-    const activeAccessStations =
-      accessStations.length > 0 ? accessStations : [fallbackAccessStation];
+    for (const station of activeAccessStations) {
+      if (!station.citycode) station.citycode = anchorCitycode;
+    }
     const candidateLimit = Math.max(
       4,
       Math.floor(12 / activeAccessStations.length),
@@ -552,6 +660,8 @@ export async function POST(request: Request) {
     const evaluated = successful.map<ReachableStation>(
       ({ station, route }) => ({
         ...station,
+        transitDurationSeconds: route.transitDurationSeconds,
+        transitDurationMinutes: Math.ceil(route.transitDurationSeconds / 60),
         durationSeconds: route.durationSeconds,
         durationMinutes: Math.ceil(route.durationSeconds / 60),
         straightLineMeters: straightLineDistance(
@@ -565,7 +675,11 @@ export async function POST(request: Request) {
       }),
     );
     const reachable = evaluated
-      .filter((station) => station.durationSeconds <= budgetMinutes * 60)
+      .filter(
+        (station) =>
+          station.transitDurationSeconds <=
+          station.accessStation.remainingTransitSeconds,
+      )
       .sort(
         (left, right) => right.straightLineMeters - left.straightLineMeters,
       );
@@ -580,6 +694,16 @@ export async function POST(request: Request) {
       candidateCount: candidates.length,
       routeCheckCount: routePairs.length,
       selectedAccessStationCount: accessStations.length,
+      accessStationBudgets: plannedAccessStations.map((station) => ({
+        id: station.id,
+        name: station.name,
+        walkingDistanceMeters: station.walkingDistanceMeters,
+        walkingMinutes: Math.ceil(station.walkingDurationSeconds / 60),
+        remainingTransitMinutes: Math.floor(
+          station.remainingTransitSeconds / 60,
+        ),
+        usable: station.remainingTransitSeconds > 0,
+      })),
       checkedCount: successful.length,
       failedCount: candidates.length - successful.length,
       reachableCount: reachable.length,

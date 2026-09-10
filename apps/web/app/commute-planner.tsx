@@ -45,6 +45,8 @@ type Station = {
 
 type ReachableStation = Station & {
   logicalId: string;
+  transitDurationSeconds: number;
+  transitDurationMinutes: number;
   durationSeconds: number;
   durationMinutes: number;
   straightLineMeters: number;
@@ -56,6 +58,8 @@ type ReachableStation = Station & {
     name: string;
     walkingDistanceMeters: number;
     walkingMinutes: number;
+    remainingTransitSeconds: number;
+    remainingTransitMinutes: number;
   };
 };
 
@@ -66,6 +70,14 @@ type ReachabilityResult = {
   candidateCount: number;
   routeCheckCount: number;
   selectedAccessStationCount: number;
+  accessStationBudgets: Array<{
+    id: string;
+    name: string;
+    walkingDistanceMeters: number;
+    walkingMinutes: number;
+    remainingTransitMinutes: number;
+    usable: boolean;
+  }>;
   checkedCount: number;
   failedCount: number;
   reachableCount: number;
@@ -972,8 +984,9 @@ export function CommutePlanner() {
                       公里
                     </span>
                     <span className="route-access-note">
-                      经 {reachability.farthest.accessStation.name} · 接驳步行约{' '}
+                      经 {reachability.farthest.accessStation.name} · 步行{' '}
                       {reachability.farthest.accessStation.walkingMinutes} 分钟
+                      + 公交 {reachability.farthest.transitDurationMinutes} 分钟
                     </span>
                   </div>
                 </div>
@@ -1018,6 +1031,16 @@ export function CommutePlanner() {
                 </span>
               </div>
 
+              <div className="access-budget-list">
+                {reachability.accessStationBudgets.map((station) => (
+                  <span key={station.id}>
+                    <strong>{station.name}</strong>
+                    步行 {station.walkingMinutes} 分钟 · 公交预算{' '}
+                    {station.remainingTransitMinutes} 分钟
+                  </span>
+                ))}
+              </div>
+
               <div className="reachability-list">
                 {reachability.stations.slice(0, 6).map((station, index) => (
                   <button
@@ -1038,8 +1061,9 @@ export function CommutePlanner() {
                         公里
                       </small>
                       <small>
-                        经 {station.accessStation.name} · 步行约{' '}
-                        {station.accessStation.walkingMinutes} 分钟
+                        经 {station.accessStation.name} · 步行{' '}
+                        {station.accessStation.walkingMinutes} 分钟 + 公交{' '}
+                        {station.transitDurationMinutes} 分钟
                       </small>
                     </span>
                     <span className="duration-chip">
@@ -1049,7 +1073,7 @@ export function CommutePlanner() {
                 ))}
               </div>
               <p className="sampling-note">
-                当前结果基于方向抽样；接驳步行按直线距离估算，不代表完整等时圈。
+                接驳步行来自高德步行路径规划；公共交通只使用扣除步行后的剩余预算。当前仍为方向抽样，不代表完整等时圈。
               </p>
             </div>
           )}

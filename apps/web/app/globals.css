@@ -832,6 +832,29 @@ input {
   color: #24483e;
   font-size: 13px;
 }
+
+.access-budget-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.access-budget-list span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid #dce5e1;
+  border-radius: 10px;
+  background: #f7faf8;
+  color: #66736e;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.access-budget-list strong {
+  color: #24463c;
+}
 .reachability-list {
   margin-top: 10px;
 }
