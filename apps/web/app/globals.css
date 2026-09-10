@@ -210,6 +210,47 @@ input {
   position: relative;
   margin-top: 26px;
 }
+.recent-place-list {
+  margin-top: 10px;
+}
+.recent-place-list > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #7c8883;
+  font-size: 10px;
+  font-weight: 700;
+}
+.recent-place-list > span svg {
+  width: 12px;
+  height: 12px;
+}
+.recent-place-list > div {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.recent-place-list button {
+  max-width: 150px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid #dbe4df;
+  border-radius: 999px;
+  background: #f7faf8;
+  padding: 6px 9px;
+  color: #36594d;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-place-list button:hover {
+  border-color: #b9cbc3;
+  background: #eef5f2;
+}
 .search-block > label {
   display: block;
   margin-bottom: 8px;
@@ -348,6 +389,61 @@ input {
   margin-top: 2px;
   color: #6b7873;
   font-size: 11px;
+}
+.local-memory-card {
+  margin-top: 12px;
+  border: 1px solid #dfe7e3;
+  border-radius: 12px;
+  background: #f6f9f7;
+  padding: 10px 11px;
+}
+.local-memory-card > div {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.local-memory-card > div > svg {
+  width: 16px;
+  color: #29614f;
+}
+.local-memory-card strong,
+.local-memory-card small {
+  display: block;
+}
+.local-memory-card strong {
+  color: #294c41;
+  font-size: 11px;
+}
+.local-memory-card small {
+  margin-top: 1px;
+  color: #85908c;
+  font-size: 9px;
+}
+.local-memory-card p {
+  margin: 7px 0 0 26px;
+  color: #557168;
+  font-size: 9px;
+}
+.local-memory-card > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 7px 0 0 26px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: #9b5b50;
+  cursor: pointer;
+  font-size: 9px;
+}
+.local-memory-card > button:disabled {
+  color: #a7afac;
+  cursor: default;
+}
+.local-memory-card > button svg {
+  width: 11px;
+  height: 11px;
 }
 
 .condition-section {

@@ -8,6 +8,8 @@ import {
   ChevronRight,
   CircleAlert,
   Clock3,
+  Database,
+  History,
   LocateFixed,
   MapPin,
   Radar,
@@ -15,10 +17,20 @@ import {
   Sparkles,
   TrainFront,
   Trophy,
+  Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
+import {
+  addRecentPlace,
+  clearPlannerMemory,
+  isLocalMemoryEnabled,
+  readPlannerMemory,
+  setLocalMemoryEnabled,
+  writePlannerMemory,
+} from '@/lib/local-memory';
 
 type PlaceTip = {
   id: string;
@@ -268,6 +280,56 @@ export function CommutePlanner() {
   const [budget, setBudget] = useState(45);
   const [departureDate, setDepartureDate] = useState(tomorrowAsInputValue);
   const [departureTime, setDepartureTime] = useState('08:30');
+  const [memoryReady, setMemoryReady] = useState(false);
+  const [rememberLocally, setRememberLocally] = useState(true);
+  const [recentPlaces, setRecentPlaces] = useState<PlaceTip[]>([]);
+  const [memoryMessage, setMemoryMessage] = useState('');
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const enabled = isLocalMemoryEnabled();
+      setRememberLocally(enabled);
+      const memory = enabled ? readPlannerMemory() : null;
+      if (memory) {
+        const { preferences } = memory;
+        setBudget(preferences.budget);
+        setDepartureDate(preferences.departureDate);
+        setDepartureTime(preferences.departureTime);
+        setStationRadius(preferences.stationRadius);
+        setRecentPlaces(memory.recentPlaces);
+        if (preferences.selectedPlace) {
+          setSelectedPlace(preferences.selectedPlace);
+          setQuery(preferences.selectedPlace.name);
+          setMemoryMessage('已恢复上次的工作地点和通勤条件');
+        }
+      }
+      setMemoryReady(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!memoryReady || !rememberLocally) return;
+    writePlannerMemory(
+      {
+        selectedPlace,
+        budget,
+        departureDate,
+        departureTime,
+        stationRadius,
+      },
+      recentPlaces,
+    );
+  }, [
+    budget,
+    departureDate,
+    departureTime,
+    memoryReady,
+    recentPlaces,
+    rememberLocally,
+    selectedPlace,
+    stationRadius,
+  ]);
 
   useEffect(() => {
     const context = document.modelContext;
@@ -379,6 +441,31 @@ export function CommutePlanner() {
   }, []);
 
   useEffect(() => {
+    const AMap = amapRef.current;
+    const map = mapRef.current;
+    if (
+      mapState !== 'ready' ||
+      !selectedPlace ||
+      !AMap ||
+      !map ||
+      anchorMarkerRef.current
+    ) {
+      return;
+    }
+    const position = parseLocation(selectedPlace.location);
+    const marker = new AMap.Marker({
+      map,
+      position,
+      anchor: 'bottom-center',
+      title: selectedPlace.name,
+    });
+    anchorMarkerRef.current = marker;
+    overlaysRef.current.push(marker);
+    map.setCenter(position);
+    map.setZoom(15);
+  }, [mapState, selectedPlace]);
+
+  useEffect(() => {
     const trimmed = query.trim();
     if (trimmed.length < 2 || selectedPlace?.name === trimmed) {
       return;
@@ -486,6 +573,11 @@ export function CommutePlanner() {
     setStationState('idle');
     resetReachability();
     clearMapOverlays();
+
+    if (rememberLocally) {
+      setRecentPlaces((current) => addRecentPlace(current, place));
+      setMemoryMessage('工作地点已记在本机');
+    }
 
     const AMap = amapRef.current;
     const map = mapRef.current;
@@ -863,6 +955,26 @@ export function CommutePlanner() {
                 ))}
               </div>
             )}
+
+            {recentPlaces.length > 0 && (
+              <div className="recent-place-list" aria-label="最近工作地点">
+                <span>
+                  <History aria-hidden="true" /> 最近使用
+                </span>
+                <div>
+                  {recentPlaces.map((place) => (
+                    <button
+                      type="button"
+                      key={`${place.id}:${place.location}`}
+                      onClick={() => selectPlace(place)}
+                      title={place.address || place.district}
+                    >
+                      {place.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {selectedPlace && (
@@ -877,6 +989,43 @@ export function CommutePlanner() {
               </div>
             </div>
           )}
+
+          <div className="local-memory-card">
+            <div>
+              <Database aria-hidden="true" />
+              <span>
+                <strong>仅在这台设备记住</strong>
+                <small>最多保留 5 个工作地点，不保存地图密钥</small>
+              </span>
+              <Switch
+                checked={rememberLocally}
+                aria-label="在本机记住工作地点和通勤条件"
+                onCheckedChange={(checked) => {
+                  setRememberLocally(checked);
+                  setLocalMemoryEnabled(checked);
+                  if (!checked) {
+                    clearPlannerMemory();
+                    setRecentPlaces([]);
+                    setMemoryMessage('本机记忆已关闭并清除');
+                  } else {
+                    setMemoryMessage('本机记忆已开启');
+                  }
+                }}
+              />
+            </div>
+            {memoryMessage && <p>{memoryMessage}</p>}
+            <button
+              type="button"
+              disabled={!rememberLocally}
+              onClick={() => {
+                clearPlannerMemory();
+                setRecentPlaces([]);
+                setMemoryMessage('已清除本机保存的地点和条件');
+              }}
+            >
+              <Trash2 aria-hidden="true" /> 清除本机记录
+            </button>
+          </div>
 
           <div className="condition-section">
             <div className="section-title-row">
