@@ -387,7 +387,7 @@ input {
   color: #8a9490;
   font-size: 10px;
 }
-.bidirectional-note {
+.one-way-note {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -397,19 +397,19 @@ input {
   padding: 10px 12px;
   color: #285347;
 }
-.bidirectional-note > svg {
+.one-way-note > svg {
   width: 19px;
   flex: 0 0 auto;
 }
-.bidirectional-note span,
-.bidirectional-note strong,
-.bidirectional-note small {
+.one-way-note span,
+.one-way-note strong,
+.one-way-note small {
   display: block;
 }
-.bidirectional-note strong {
+.one-way-note strong {
   font-size: 12px;
 }
-.bidirectional-note small {
+.one-way-note small {
   margin-top: 2px;
   color: #74817c;
   font-size: 10px;
@@ -902,6 +902,20 @@ input {
 .reachability-list button:hover strong {
   color: #d44936;
 }
+.reachability-list button.is-active {
+  border: 1px solid rgba(18, 107, 85, 0.42);
+  border-radius: 10px;
+  background: #edf7f3;
+  box-shadow: inset 3px 0 #126b55;
+  padding-inline: 7px;
+}
+.reachability-list button.is-active strong {
+  color: #126b55;
+}
+.reachability-list button.is-active .duration-chip {
+  background: #126b55;
+  color: #fff;
+}
 .reachability-list strong,
 .reachability-list small {
   display: block;
@@ -1155,6 +1169,21 @@ input {
   box-shadow:
     0 0 0 5px rgba(243, 163, 39, 0.24),
     0 5px 15px rgba(23, 32, 29, 0.35);
+}
+.reachable-map-marker.is-muted {
+  opacity: 0.38;
+  filter: grayscale(0.35);
+  transform: scale(0.84);
+}
+.reachable-map-marker.is-active {
+  min-width: 46px;
+  height: 40px;
+  border: 4px solid #fff;
+  background: #126b55;
+  box-shadow:
+    0 0 0 5px rgba(18, 107, 85, 0.3),
+    0 7px 18px rgba(12, 47, 38, 0.42);
+  transform: scale(1.08);
 }
 .reachable-map-marker em {
   font-size: 9px;

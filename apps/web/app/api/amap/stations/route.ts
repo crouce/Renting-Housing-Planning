@@ -66,16 +66,20 @@ export async function GET(request: Request) {
       )
       .map((poi) => {
         const address = normalizeAddress(poi.address);
+        const transitDescription = `${poi.name} ${address}`;
         return {
           id: poi.id,
           name: poi.name.replace(/\(公交站\)$/, ''),
           location: poi.location,
           distanceMeters: Number(poi.distance ?? 0),
-          mode: poi.typecode?.startsWith('1505')
-            ? 'SUBWAY'
-            : poi.typecode?.startsWith('1506')
-              ? 'LIGHT_RAIL'
-              : 'BUS',
+          mode: /有轨电车|轻轨/.test(transitDescription)
+            ? 'LIGHT_RAIL'
+            : poi.typecode?.startsWith('1505') ||
+                /地铁|轨道交通/.test(transitDescription)
+              ? 'SUBWAY'
+              : poi.typecode?.startsWith('1506')
+                ? 'LIGHT_RAIL'
+                : 'BUS',
           address,
           lines: parseTransitLines(address),
           citycode: poi.citycode ?? '',

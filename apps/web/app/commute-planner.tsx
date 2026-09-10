@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeftRight,
   Building2,
   BusFront,
   CalendarDays,
@@ -79,7 +78,7 @@ type RouteGeometrySegment = {
 };
 
 type DirectionReachability = {
-  direction: 'to' | 'from';
+  direction: 'to';
   routeCheckCount: number;
   checkedCount: number;
   failedCount: number;
@@ -110,7 +109,6 @@ type ReachabilityResult = {
   }>;
   directions: {
     to: DirectionReachability;
-    from: DirectionReachability;
   };
   cached?: boolean;
 };
@@ -162,31 +160,30 @@ declare global {
 }
 
 const DEFAULT_CENTER: [number, number] = [121.4737, 31.2304];
-const ROUTE_PALETTES = {
-  to: ['#126b55', '#167c96', '#315fa8', '#6250a8'],
-  from: ['#d9503f', '#d87924', '#a94d83', '#754fa3'],
-} as const;
-const WALKING_ROUTE_COLORS = { to: '#18765d', from: '#e45b43' } as const;
+const ROUTE_PALETTE = ['#126b55', '#167c96', '#315fa8', '#6250a8'] as const;
+const WALKING_ROUTE_COLOR = '#6f7f79';
 
 function displayLineName(lineName?: string) {
   return lineName?.split('(')[0].trim() || '公共交通';
 }
 
-function routeVisuals(result: DirectionReachability, direction: 'to' | 'from') {
+function routeVisuals(station?: ReachableStation | null) {
   const lineColors = new Map<string, string>();
-  return (result.farthest?.routeGeometry ?? []).map((segment, index) => {
+  return (station?.routeGeometry ?? []).map((segment, index) => {
     if (segment.mode === 'WALK') {
       return {
         segment,
-        color: WALKING_ROUTE_COLORS[direction],
-        lineKey: `${direction}:walk:${index}`,
+        color: WALKING_ROUTE_COLOR,
+        lineKey: `walk:${index}`,
         lineLabel: '换乘步行',
       };
     }
-    const lineKey = `${direction}:${segment.lineId ?? segment.lineName ?? index}`;
+    const lineKey = segment.lineId ?? segment.lineName ?? `line:${index}`;
     if (!lineColors.has(lineKey)) {
-      const palette = ROUTE_PALETTES[direction];
-      lineColors.set(lineKey, palette[lineColors.size % palette.length]);
+      lineColors.set(
+        lineKey,
+        ROUTE_PALETTE[lineColors.size % ROUTE_PALETTE.length],
+      );
     }
     return {
       segment,
@@ -266,6 +263,8 @@ export function CommutePlanner() {
   const [reachability, setReachability] = useState<ReachabilityResult | null>(
     null,
   );
+  const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
+  const [reachabilityError, setReachabilityError] = useState('');
   const [budget, setBudget] = useState(45);
   const [departureDate, setDepartureDate] = useState(tomorrowAsInputValue);
   const [departureTime, setDepartureTime] = useState('08:30');
@@ -280,7 +279,8 @@ export function CommutePlanner() {
         {
           name: 'configure_commute_search',
           title: '设置通勤查询',
-          description: '填写可见的工作地点关键词、双向通勤时间预算和出发时间。',
+          description:
+            '填写可见的工作地点关键词、住所到公司的通勤时间预算和出发时间。',
           inputSchema: {
             type: 'object',
             properties: {
@@ -332,7 +332,7 @@ export function CommutePlanner() {
             return {
               query: nextQuery,
               budgetMinutes: nextBudget,
-              directions: ['to_work', 'from_work'],
+              direction: 'to_work',
               status: 'configured',
             };
           },
@@ -425,6 +425,8 @@ export function CommutePlanner() {
   function resetReachability() {
     setReachability(null);
     setReachabilityState('idle');
+    setActiveRouteId(null);
+    setReachabilityError('');
   }
 
   function resetNearbyStations() {
@@ -545,10 +547,161 @@ export function CommutePlanner() {
     }
   }
 
+  function drawReachabilityMap(
+    data: ReachabilityResult,
+    activeStation: ReachableStation,
+  ) {
+    const AMap = amapRef.current;
+    const map = mapRef.current;
+    if (!AMap || !map) return;
+
+    clearMapOverlays();
+    const focusOverlays: AMapOverlay[] = [];
+    const anchor = anchorMarkerRef.current;
+    if (anchor) {
+      anchor.setMap(map);
+      overlaysRef.current.push(anchor);
+      focusOverlays.push(anchor);
+    }
+
+    const routeSegments = routeVisuals(activeStation);
+    const routePolylines = routeSegments.map(
+      ({ segment, color }) =>
+        new AMap.Polyline({
+          map,
+          path: segment.path,
+          zIndex: segment.mode === 'WALK' ? 39 : 42,
+          isOutline: true,
+          outlineColor: '#ffffff',
+          borderWeight: 2,
+          strokeColor: color,
+          strokeOpacity: segment.mode === 'WALK' ? 0.82 : 1,
+          strokeWeight: segment.mode === 'WALK' ? 4 : 8,
+          strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
+          lineJoin: 'round',
+          lineCap: 'round',
+        }),
+    );
+    overlaysRef.current.push(...routePolylines);
+    focusOverlays.push(...routePolylines);
+
+    const routeStops = new Map<
+      string,
+      {
+        name: string;
+        location: [number, number];
+        roles: Set<RouteGeometrySegment['stops'][number]['role']>;
+        lines: Map<string, { label: string; color: string }>;
+      }
+    >();
+    for (const visual of routeSegments) {
+      if (visual.segment.mode !== 'TRANSIT') continue;
+      for (const stop of visual.segment.stops) {
+        const key = stop.id || `${stop.name}:${stop.location.join(',')}`;
+        const current = routeStops.get(key) ?? {
+          name: stop.name,
+          location: stop.location,
+          roles: new Set(),
+          lines: new Map(),
+        };
+        current.roles.add(stop.role);
+        current.lines.set(visual.lineKey, {
+          label: visual.lineLabel,
+          color: visual.color,
+        });
+        routeStops.set(key, current);
+      }
+    }
+    const routeStopMarkers = [...routeStops.values()].map((stop) => {
+      const content = document.createElement('div');
+      content.className = `route-stop-marker${
+        stop.roles.has('BOARD') || stop.roles.has('ALIGHT')
+          ? ' is-transfer'
+          : ''
+      }`;
+      const dot = document.createElement('i');
+      const label = document.createElement('span');
+      label.textContent = stop.name;
+      const lines = document.createElement('small');
+      for (const line of stop.lines.values()) {
+        const badge = document.createElement('b');
+        badge.textContent = line.label;
+        badge.style.setProperty('--route-line-color', line.color);
+        lines.appendChild(badge);
+      }
+      content.appendChild(dot);
+      content.appendChild(label);
+      content.appendChild(lines);
+      return new AMap.Marker({
+        map,
+        position: stop.location,
+        anchor: 'bottom-center',
+        zIndex: 92,
+        title: `${stop.name} · ${[...stop.lines.values()]
+          .map((line) => line.label)
+          .join(' / ')}`,
+        content,
+      });
+    });
+    overlaysRef.current.push(...routeStopMarkers);
+    focusOverlays.push(...routeStopMarkers);
+
+    const startMarkers = stations
+      .filter((station) => selectedStationIds.includes(station.id))
+      .map(
+        (station) =>
+          new AMap.Marker({
+            map,
+            position: parseLocation(station.location),
+            anchor: 'center',
+            zIndex: 120,
+            title: `公司侧接驳站：${station.name}`,
+            content: '<span class="route-start-marker">司</span>',
+          }),
+      );
+    overlaysRef.current.push(...startMarkers);
+    focusOverlays.push(...startMarkers);
+
+    const candidateMarkers = data.directions.to.stations.map((station) => {
+      const isActive = station.logicalId === activeStation.logicalId;
+      const isFarthest =
+        station.logicalId === data.directions.to.farthest?.logicalId;
+      const content = document.createElement('span');
+      content.className = `reachable-map-marker ${
+        station.mode === 'BUS' ? 'is-bus' : 'is-rail'
+      }${isFarthest ? ' is-farthest' : ''}${
+        isActive ? ' is-active' : ' is-muted'
+      }`;
+      const minutes = document.createElement('em');
+      minutes.textContent = `${station.durationMinutes}分`;
+      content.appendChild(minutes);
+      const marker = new AMap.Marker({
+        map,
+        position: parseLocation(station.location),
+        anchor: 'center',
+        zIndex: isActive ? 135 : 80,
+        title: `${station.name} · ${station.durationMinutes} 分钟`,
+        content,
+      });
+      if (isActive) focusOverlays.push(marker);
+      return marker;
+    });
+    overlaysRef.current.push(...candidateMarkers);
+    map.setFitView(focusOverlays, false, [90, 70, 90, 430]);
+  }
+
+  function activateRoute(station: ReachableStation) {
+    if (!reachability || station.routeGeometry.length === 0) return;
+    setActiveRouteId(station.logicalId);
+    drawReachabilityMap(reachability, station);
+  }
+
   async function calculateReachability() {
     if (!selectedPlace || selectedStationIds.length === 0) return;
     setReachabilityState('loading');
     setReachability(null);
+    setActiveRouteId(null);
+    setReachabilityError('');
 
     try {
       const response = await fetch('/api/amap/reachability', {
@@ -578,189 +731,29 @@ export function CommutePlanner() {
             })),
         }),
       });
-      if (!response.ok) throw new Error('Reachability scan failed');
-      const data = (await response.json()) as ReachabilityResult;
+      const payload = (await response.json()) as
+        | ReachabilityResult
+        | { error?: { message?: string } };
+      if (!response.ok || !('directions' in payload)) {
+        throw new Error(
+          'error' in payload && payload.error?.message
+            ? payload.error.message
+            : '通勤圈计算失败，请稍后重试。',
+        );
+      }
+      const data = payload;
       setReachability(data);
       setReachabilityState('ready');
-
-      const AMap = amapRef.current;
-      const map = mapRef.current;
-      if (!AMap || !map) return;
-      clearMapOverlays();
-      const anchor = anchorMarkerRef.current;
-      if (anchor) {
-        anchor.setMap(map);
-        overlaysRef.current.push(anchor);
+      const initialStation =
+        data.directions.to.farthest ?? data.directions.to.stations[0];
+      if (initialStation) {
+        setActiveRouteId(initialStation.logicalId);
+        drawReachabilityMap(data, initialStation);
       }
-
-      const routeDirections = [
-        {
-          direction: 'to',
-          result: data.directions.to,
-          strokeWeight: 7,
-          zIndex: 33,
-        },
-        {
-          direction: 'from',
-          result: data.directions.from,
-          strokeWeight: 4,
-          zIndex: 34,
-        },
-      ] as const;
-      const routeSegments = routeDirections.flatMap(
-        ({ direction, result, strokeWeight, zIndex }) =>
-          routeVisuals(result, direction).map((visual) => ({
-            ...visual,
-            direction,
-            strokeWeight,
-            zIndex,
-          })),
+    } catch (error) {
+      setReachabilityError(
+        error instanceof Error ? error.message : '通勤圈计算失败。',
       );
-      const routePolylines = routeSegments.map(
-        ({ segment, color, strokeWeight, zIndex }) =>
-          new AMap.Polyline({
-            map,
-            path: segment.path,
-            zIndex,
-            isOutline: true,
-            outlineColor: '#ffffff',
-            borderWeight: 1,
-            strokeColor: color,
-            strokeOpacity: segment.mode === 'WALK' ? 0.75 : 0.92,
-            strokeWeight:
-              segment.mode === 'WALK'
-                ? Math.max(2, strokeWeight - 2)
-                : strokeWeight,
-            strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
-            lineJoin: 'round',
-            lineCap: 'round',
-          }),
-      );
-      overlaysRef.current.push(...routePolylines);
-
-      const routeStops = new Map<
-        string,
-        {
-          name: string;
-          location: [number, number];
-          roles: Set<RouteGeometrySegment['stops'][number]['role']>;
-          lines: Map<string, { label: string; color: string }>;
-        }
-      >();
-      for (const visual of routeSegments) {
-        if (visual.segment.mode !== 'TRANSIT') continue;
-        for (const stop of visual.segment.stops) {
-          const key = stop.id || `${stop.name}:${stop.location.join(',')}`;
-          const current = routeStops.get(key) ?? {
-            name: stop.name,
-            location: stop.location,
-            roles: new Set(),
-            lines: new Map(),
-          };
-          current.roles.add(stop.role);
-          current.lines.set(visual.lineKey, {
-            label: `${visual.direction === 'to' ? '去' : '回'}·${visual.lineLabel}`,
-            color: visual.color,
-          });
-          routeStops.set(key, current);
-        }
-      }
-      const routeStopMarkers = [...routeStops.values()].map((stop) => {
-        const content = document.createElement('div');
-        content.className = `route-stop-marker${
-          stop.roles.has('BOARD') || stop.roles.has('ALIGHT')
-            ? ' is-transfer'
-            : ''
-        }`;
-        const dot = document.createElement('i');
-        const label = document.createElement('span');
-        label.textContent = stop.name;
-        const lines = document.createElement('small');
-        for (const line of stop.lines.values()) {
-          const badge = document.createElement('b');
-          badge.textContent = line.label;
-          badge.style.setProperty('--route-line-color', line.color);
-          lines.appendChild(badge);
-        }
-        content.appendChild(dot);
-        content.appendChild(label);
-        content.appendChild(lines);
-        return new AMap.Marker({
-          map,
-          position: stop.location,
-          anchor: 'bottom-center',
-          zIndex: 92,
-          title: `${stop.name} · ${[...stop.lines.values()]
-            .map((line) => line.label)
-            .join(' / ')}`,
-          content,
-        });
-      });
-      overlaysRef.current.push(...routeStopMarkers);
-
-      const startMarkers = stations
-        .filter((station) => selectedStationIds.includes(station.id))
-        .map(
-          (station) =>
-            new AMap.Marker({
-              map,
-              position: parseLocation(station.location),
-              anchor: 'center',
-              zIndex: 120,
-              title: `接驳起始站：${station.name}`,
-              content: '<span class="route-start-marker">起</span>',
-            }),
-        );
-      overlaysRef.current.push(...startMarkers);
-
-      const markerStations = new Map<
-        string,
-        {
-          station: ReachableStation;
-          toMinutes?: number;
-          fromMinutes?: number;
-          isFarthest: boolean;
-        }
-      >();
-      for (const [directionKey, result] of Object.entries(data.directions) as [
-        'to' | 'from',
-        DirectionReachability,
-      ][]) {
-        for (const station of result.stations) {
-          const existing = markerStations.get(station.logicalId);
-          markerStations.set(station.logicalId, {
-            station,
-            toMinutes:
-              directionKey === 'to'
-                ? station.durationMinutes
-                : existing?.toMinutes,
-            fromMinutes:
-              directionKey === 'from'
-                ? station.durationMinutes
-                : existing?.fromMinutes,
-            isFarthest:
-              existing?.isFarthest === true ||
-              station.logicalId === result.farthest?.logicalId,
-          });
-        }
-      }
-      const markers = [...markerStations.values()].map((item) => {
-        const modeClass = item.station.mode === 'BUS' ? 'is-bus' : 'is-rail';
-        const labels = [
-          item.toMinutes ? `去${item.toMinutes}` : '',
-          item.fromMinutes ? `回${item.fromMinutes}` : '',
-        ].filter(Boolean);
-        return new AMap.Marker({
-          map,
-          position: parseLocation(item.station.location),
-          anchor: 'center',
-          title: `${item.station.name} · ${labels.join(' / ')} 分钟`,
-          content: `<span class="reachable-map-marker ${modeClass}${item.isFarthest ? ' is-farthest' : ''}"><em>${labels.join('·')}</em></span>`,
-        });
-      });
-      overlaysRef.current.push(...markers);
-      map.setFitView(overlaysRef.current, false, [90, 70, 90, 430]);
-    } catch {
       setReachabilityState('error');
     }
   }
@@ -770,22 +763,24 @@ export function CommutePlanner() {
         .filter(Boolean)
         .join(' · ')
     : '';
-  const routeLineLegend = reachability
-    ? (['to', 'from'] as const).flatMap((direction) => {
-        const seen = new Set<string>();
-        return routeVisuals(reachability.directions[direction], direction)
-          .filter(({ segment, lineKey }) => {
-            if (segment.mode !== 'TRANSIT' || seen.has(lineKey)) return false;
-            seen.add(lineKey);
-            return true;
-          })
-          .map(({ lineKey, lineLabel, color }) => ({
-            key: lineKey,
-            label: `${direction === 'to' ? '去' : '回'}·${lineLabel}`,
-            color,
-          }));
-      })
-    : [];
+  const activeRouteStation = reachability
+    ? (reachability.directions.to.stations.find(
+        (station) => station.logicalId === activeRouteId,
+      ) ?? reachability.directions.to.farthest)
+    : null;
+  const seenLegendLines = new Set<string>();
+  const routeLineLegend = routeVisuals(activeRouteStation)
+    .filter(({ segment, lineKey }) => {
+      if (segment.mode !== 'TRANSIT' || seenLegendLines.has(lineKey))
+        return false;
+      seenLegendLines.add(lineKey);
+      return true;
+    })
+    .map(({ lineKey, lineLabel, color }) => ({
+      key: lineKey,
+      label: lineLabel,
+      color,
+    }));
 
   return (
     <main className="planner-shell">
@@ -909,11 +904,11 @@ export function CommutePlanner() {
               <span>90 分钟</span>
             </div>
 
-            <div className="bidirectional-note">
-              <ArrowLeftRight aria-hidden="true" />
+            <div className="one-way-note">
+              <ChevronRight aria-hidden="true" />
               <span>
-                <strong>同时核验双向通勤</strong>
-                <small>住处 → 公司与公司 → 住处使用同一日期、时刻</small>
+                <strong>按住所 → 公司核验</strong>
+                <small>只计算上班方向，减少一半路线检索</small>
               </span>
             </div>
 
@@ -1142,7 +1137,7 @@ export function CommutePlanner() {
                   ? '正在规划候选路线…'
                   : selectedStationIds.length === 0
                     ? '请先选择接驳站点'
-                    : `按 ${selectedStationIds.length} 个站点计算双向 ${budget} 分钟通勤圈`}
+                    : `按 ${selectedStationIds.length} 个站点计算 ${budget} 分钟上班通勤圈`}
               </Button>
 
               {reachabilityState === 'loading' && (
@@ -1151,7 +1146,7 @@ export function CommutePlanner() {
                   <div>
                     <strong>正在展开接驳站的线路与完整站序</strong>
                     <small>
-                      再按剩余预算核验双向公交路线，通常需要 15～60 秒。
+                      再按剩余预算核验住所到公司的公交路线，通常需要 8～30 秒。
                     </small>
                   </div>
                 </output>
@@ -1160,7 +1155,7 @@ export function CommutePlanner() {
               {reachabilityState === 'error' && (
                 <p className="inline-error">
                   <CircleAlert />
-                  通勤圈计算失败，请稍后重试。
+                  {reachabilityError || '通勤圈计算失败，请稍后重试。'}
                 </p>
               )}
             </div>
@@ -1172,8 +1167,8 @@ export function CommutePlanner() {
                 <div>
                   <span className="step-kicker">04 · 通勤圈结果</span>
                   <strong>
-                    去公司 {reachability.directions.to.reachableCount} 个 ·
-                    回住处 {reachability.directions.from.reachableCount} 个
+                    住所到公司可达 {reachability.directions.to.reachableCount}{' '}
+                    个
                   </strong>
                 </div>
                 <Radar aria-hidden="true" />
@@ -1215,82 +1210,98 @@ export function CommutePlanner() {
               </div>
 
               <div className="direction-results">
-                {(
-                  [
-                    {
-                      key: 'to',
-                      title: '住处 → 公司',
-                      result: reachability.directions.to,
-                    },
-                    {
-                      key: 'from',
-                      title: '公司 → 住处',
-                      result: reachability.directions.from,
-                    },
-                  ] as const
-                ).map(({ key, title, result }) => (
-                  <section className="direction-result" key={key}>
-                    <div className="direction-result-heading">
-                      <strong>{title}</strong>
-                      <span>{result.reachableCount} 个可达样本</span>
+                <section className="direction-result">
+                  <div className="direction-result-heading">
+                    <strong>住所 → 公司</strong>
+                    <span>
+                      {reachability.directions.to.reachableCount} 个可达样本
+                    </span>
+                  </div>
+
+                  {reachability.directions.to.farthest ? (
+                    <div className="farthest-card">
+                      <span className="farthest-icon">
+                        <Trophy />
+                      </span>
+                      <div>
+                        <small>最远可达住所侧站点</small>
+                        <strong>
+                          {reachability.directions.to.farthest.name}
+                        </strong>
+                        <span>
+                          总计{' '}
+                          {reachability.directions.to.farthest.durationMinutes}{' '}
+                          分钟 · 直线{' '}
+                          {(
+                            reachability.directions.to.farthest
+                              .straightLineMeters / 1000
+                          ).toFixed(1)}{' '}
+                          公里
+                        </span>
+                        <span className="route-access-note">
+                          到{' '}
+                          {
+                            reachability.directions.to.farthest.accessStation
+                              .name
+                          }{' '}
+                          · 公交{' '}
+                          {
+                            reachability.directions.to.farthest
+                              .transitDurationMinutes
+                          }{' '}
+                          分钟 + 步行{' '}
+                          {
+                            reachability.directions.to.farthest.accessStation
+                              .walkingMinutes
+                          }{' '}
+                          分钟
+                        </span>
+                      </div>
                     </div>
-
-                    {result.farthest ? (
-                      <div className="farthest-card">
-                        <span className="farthest-icon">
-                          <Trophy />
+                  ) : reachability.directions.to.nearMisses[0] ? (
+                    <div className="farthest-card is-near-miss">
+                      <span className="farthest-icon">
+                        <Clock3 />
+                      </span>
+                      <div>
+                        <small>最接近预算的候选</small>
+                        <strong>
+                          {reachability.directions.to.nearMisses[0].name}
+                        </strong>
+                        <span>
+                          需要{' '}
+                          {
+                            reachability.directions.to.nearMisses[0]
+                              .durationMinutes
+                          }{' '}
+                          分钟，超出预算{' '}
+                          {Math.max(
+                            1,
+                            reachability.directions.to.nearMisses[0]
+                              .durationMinutes - budget,
+                          )}{' '}
+                          分钟
                         </span>
-                        <div>
-                          <small>本方向最远可达</small>
-                          <strong>{result.farthest.name}</strong>
-                          <span>
-                            总计 {result.farthest.durationMinutes} 分钟 · 直线{' '}
-                            {(
-                              result.farthest.straightLineMeters / 1000
-                            ).toFixed(1)}{' '}
-                            公里
-                          </span>
-                          <span className="route-access-note">
-                            经 {result.farthest.accessStation.name} · 步行{' '}
-                            {result.farthest.accessStation.walkingMinutes} 分钟
-                            + 公交 {result.farthest.transitDurationMinutes} 分钟
-                          </span>
-                        </div>
                       </div>
-                    ) : result.nearMisses[0] ? (
-                      <div className="farthest-card is-near-miss">
-                        <span className="farthest-icon">
-                          <Clock3 />
-                        </span>
-                        <div>
-                          <small>最接近预算的候选</small>
-                          <strong>{result.nearMisses[0].name}</strong>
-                          <span>
-                            需要 {result.nearMisses[0].durationMinutes} 分钟，
-                            超出预算{' '}
-                            {Math.max(
-                              1,
-                              result.nearMisses[0].durationMinutes - budget,
-                            )}{' '}
-                            分钟
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="direction-empty">本方向暂无有效候选路线</p>
-                    )}
+                    </div>
+                  ) : (
+                    <p className="direction-empty">暂无有效候选路线</p>
+                  )}
 
-                    <div className="reachability-list">
-                      {result.stations.slice(0, 4).map((station, index) => (
+                  <div className="reachability-list">
+                    {reachability.directions.to.stations
+                      .slice(0, 4)
+                      .map((station, index) => (
                         <button
                           type="button"
                           key={station.id}
-                          onClick={() => {
-                            mapRef.current?.setCenter(
-                              parseLocation(station.location),
-                            );
-                            mapRef.current?.setZoom(16);
-                          }}
+                          className={
+                            activeRouteId === station.logicalId
+                              ? 'is-active'
+                              : undefined
+                          }
+                          aria-pressed={activeRouteId === station.logicalId}
+                          onClick={() => activateRoute(station)}
                         >
                           <span className="result-rank">{index + 1}</span>
                           <span>
@@ -1306,26 +1317,27 @@ export function CommutePlanner() {
                               公里
                             </small>
                             <small>
-                              步行 {station.accessStation.walkingMinutes} + 公交{' '}
-                              {station.transitDurationMinutes} 分钟
+                              公交 {station.transitDurationMinutes} + 步行{' '}
+                              {station.accessStation.walkingMinutes} 分钟
                             </small>
                             {station.routeLines.length > 0 && (
                               <small>
-                                {station.routeLines.slice(0, 2).join(' / ')}
+                                {station.routeLines.slice(0, 3).join(' / ')}
                               </small>
                             )}
                           </span>
                           <span className="duration-chip">
-                            {station.durationMinutes} 分钟
+                            {activeRouteId === station.logicalId
+                              ? '已高亮'
+                              : `${station.durationMinutes} 分钟`}
                           </span>
                         </button>
                       ))}
-                    </div>
-                  </section>
-                ))}
+                  </div>
+                </section>
               </div>
               <p className="sampling-note">
-                候选来自所选接驳站的实际线路站序，再做双向公共交通规划复核；当前为直达线路抽样，不代表完整换乘网络。
+                候选来自所选接驳站的实际线路站序，只核验住所到公司的公共交通路线；点击候选可切换并高亮其完整路线。
               </p>
             </div>
           )}
@@ -1390,7 +1402,7 @@ export function CommutePlanner() {
             <strong>
               {budget} 分钟 · 工作日 {departureTime}
             </strong>
-            <span>住处 ⇄ 工作地点，双向同时核验</span>
+            <span>住所 → 工作地点，单向路线核验</span>
           </div>
         </div>
       </section>

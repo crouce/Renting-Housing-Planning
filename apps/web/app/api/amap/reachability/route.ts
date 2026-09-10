@@ -1,6 +1,5 @@
 import { amapErrorResponse, amapRequest } from '@/lib/amap-server';
 
-type CommuteDirection = 'to' | 'from';
 type TransitMode = 'BUS' | 'SUBWAY' | 'LIGHT_RAIL';
 
 type ReachabilityRequest = {
@@ -164,7 +163,7 @@ type AccessStationBudget = {
 };
 
 type DirectionReachability = {
-  direction: CommuteDirection;
+  direction: 'to';
   routeCheckCount: number;
   checkedCount: number;
   failedCount: number;
@@ -188,7 +187,6 @@ type ReachabilityResult = {
   accessStationBudgets: AccessStationBudget[];
   directions: {
     to: DirectionReachability;
-    from: DirectionReachability;
   };
 };
 
@@ -230,7 +228,7 @@ function straightLineDistance(from: string, to: string) {
 function normalizeLineName(line: string) {
   return line
     .split('(')[0]
-    .replaceAll('地铁', '')
+    .replaceAll(/地铁|轨道交通|轨交/g, '')
     .replaceAll(/\s/g, '')
     .toLowerCase();
 }
@@ -485,7 +483,6 @@ async function planWalking(
 async function planTransit(
   station: CandidateStation,
   accessStation: AccessStationWithWalk,
-  direction: CommuteDirection,
   departureDate: string,
   departureTime: string,
 ): Promise<{
@@ -499,14 +496,13 @@ async function planTransit(
 } | null> {
   if (!station.citycode || !accessStation.citycode) return null;
 
-  const toAnchor = direction === 'to';
   const params = new URLSearchParams({
-    origin: toAnchor ? station.location : accessStation.location,
-    destination: toAnchor ? accessStation.location : station.location,
-    city1: toAnchor ? station.citycode : accessStation.citycode,
-    city2: toAnchor ? accessStation.citycode : station.citycode,
-    originpoi: toAnchor ? station.id : accessStation.id,
-    destinationpoi: toAnchor ? accessStation.id : station.id,
+    origin: station.location,
+    destination: accessStation.location,
+    city1: station.citycode,
+    city2: accessStation.citycode,
+    originpoi: station.id,
+    destinationpoi: accessStation.id,
     strategy: '8',
     AlternativeRoute: '3',
     date: departureDate,
@@ -576,7 +572,6 @@ async function planTransit(
 async function evaluateDirection(
   candidates: CandidateStation[],
   activeAccessStations: AccessStationWithWalk[],
-  direction: CommuteDirection,
   departureDate: string,
   departureTime: string,
   anchorLocation: string,
@@ -592,7 +587,6 @@ async function evaluateDirection(
       route: await planTransit(
         station,
         accessStation,
-        direction,
         departureDate,
         departureTime,
       ),
@@ -644,7 +638,7 @@ async function evaluateDirection(
   const farthest = reachable[0] ?? null;
 
   return {
-    direction,
+    direction: 'to',
     routeCheckCount: routePairs.length,
     checkedCount: successful.length,
     failedCount: candidates.length - successful.length,
@@ -663,10 +657,8 @@ async function evaluateDirection(
     })),
     stations: reachable
       .slice(0, 12)
-      .map((station) =>
-        station.logicalId === farthest?.logicalId
-          ? station
-          : { ...station, routeGeometry: [] },
+      .map((station, index) =>
+        index < 4 ? station : { ...station, routeGeometry: [] },
       ),
   };
 }
@@ -878,15 +870,6 @@ export async function POST(request: Request) {
     const to = await evaluateDirection(
       candidates,
       activeAccessStations,
-      'to',
-      departureDate,
-      departureTime,
-      validatedAnchor.location,
-    );
-    const from = await evaluateDirection(
-      candidates,
-      activeAccessStations,
-      'from',
       departureDate,
       departureTime,
       validatedAnchor.location,
@@ -899,7 +882,7 @@ export async function POST(request: Request) {
       candidateCount: candidates.length,
       lineQueryCount: lineSeeds.length,
       expandedLineCount: expandedLines.length,
-      routeCheckCount: to.routeCheckCount + from.routeCheckCount,
+      routeCheckCount: to.routeCheckCount,
       selectedAccessStationCount: accessStations.length,
       accessStationBudgets: plannedAccessStations.map((station) => ({
         id: station.id,
@@ -911,7 +894,7 @@ export async function POST(request: Request) {
         ),
         usable: station.remainingTransitSeconds > 0,
       })),
-      directions: { to, from },
+      directions: { to },
     };
 
     cache.set(cacheKey, { expiresAt: Date.now() + 5 * 60_000, value: result });
