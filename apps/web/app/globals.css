@@ -460,7 +460,7 @@ input {
   color: #87928e;
   font-size: 10px;
 }
-.station-range-control[data-slot='radio-group'] {
+.station-range-control {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 6px;
@@ -481,12 +481,12 @@ input {
   font-size: 12px;
   font-weight: 700;
 }
-.station-range-control label:has([data-checked]) {
+.station-range-control label:has(input:checked) {
   background: #fff;
   color: #173f34;
   box-shadow: 0 2px 8px rgba(23, 32, 29, 0.08);
 }
-.station-range-control [data-slot='radio-group-item'] {
+.station-range-control input {
   position: absolute;
   opacity: 0;
 }
@@ -604,6 +604,11 @@ input {
 .station-select-checkbox {
   grid-column: 1;
   grid-row: 1;
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: #173f34;
+  cursor: pointer;
 }
 .station-focus-action {
   grid-column: 2;

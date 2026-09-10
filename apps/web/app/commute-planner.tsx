@@ -18,9 +18,7 @@ import {
   Trophy,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Slider } from '@/components/ui/slider';
 
 type PlaceTip = {
@@ -732,20 +730,9 @@ export function CommutePlanner() {
               <span>附近站点范围</span>
               <small>建议先从 500 米开始，不够再扩大</small>
             </div>
-            <RadioGroup
+            <div
               className="station-range-control"
-              value={String(stationRadius)}
-              onValueChange={(value) => {
-                const nextRadius = Number(value);
-                if (
-                  nextRadius === 500 ||
-                  nextRadius === 1000 ||
-                  nextRadius === 1500
-                ) {
-                  setStationRadius(nextRadius);
-                  resetNearbyStations();
-                }
-              }}
+              role="radiogroup"
               aria-label="附近站点搜索范围"
             >
               {[
@@ -754,14 +741,21 @@ export function CommutePlanner() {
                 { value: 1500, label: '1.5 公里' },
               ].map((option) => (
                 <label key={option.value}>
-                  <RadioGroupItem
-                    value={String(option.value)}
+                  <input
+                    type="radio"
+                    name="station-radius"
+                    value={option.value}
+                    checked={stationRadius === option.value}
                     disabled={stationState === 'loading'}
+                    onChange={() => {
+                      setStationRadius(option.value as 500 | 1000 | 1500);
+                      resetNearbyStations();
+                    }}
                   />
                   <span>{option.label}</span>
                 </label>
               ))}
-            </RadioGroup>
+            </div>
           </div>
 
           <Button
@@ -828,14 +822,15 @@ export function CommutePlanner() {
                         key={station.id}
                         className={`station-list-row${isSelected ? ' is-selected' : ''}`}
                       >
-                        <Checkbox
+                        <input
+                          type="checkbox"
                           className="station-select-checkbox"
                           checked={isSelected}
                           disabled={
                             !isSelected && selectedStationIds.length >= 3
                           }
-                          onCheckedChange={(checked) =>
-                            setStationSelected(station.id, checked === true)
+                          onChange={(event) =>
+                            setStationSelected(station.id, event.target.checked)
                           }
                           aria-label={`${isSelected ? '取消选择' : '选择'}${station.name}`}
                         />
