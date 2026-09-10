@@ -53,6 +53,10 @@ type ReachableStation = Station & {
   segmentCount: number;
   routeLines: string[];
   matchedLines: string[];
+  routeGeometry: Array<{
+    mode: 'WALK' | 'TRANSIT';
+    path: Array<[number, number]>;
+  }>;
   accessStation: {
     id: string;
     name: string;
@@ -100,12 +104,13 @@ type ReachabilityResult = {
   cached?: boolean;
 };
 
-type AMapMarker = { setMap(map: AMapMap | null): void };
+type AMapOverlay = { setMap(map: AMapMap | null): void };
+type AMapMarker = AMapOverlay;
 type AMapMap = {
   setCenter(position: [number, number]): void;
   setZoom(zoom: number): void;
   setFitView(
-    overlays?: AMapMarker[],
+    overlays?: AMapOverlay[],
     immediately?: boolean,
     avoid?: number[],
   ): void;
@@ -117,6 +122,7 @@ type AMapNamespace = {
     options: Record<string, unknown>,
   ) => AMapMap;
   Marker: new (options: Record<string, unknown>) => AMapMarker;
+  Polyline: new (options: Record<string, unknown>) => AMapOverlay;
 };
 
 type ModelContext = {
@@ -192,7 +198,7 @@ export function CommutePlanner() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<AMapMap | null>(null);
   const amapRef = useRef<AMapNamespace | null>(null);
-  const overlaysRef = useRef<AMapMarker[]>([]);
+  const overlaysRef = useRef<AMapOverlay[]>([]);
   const anchorMarkerRef = useRef<AMapMarker | null>(null);
   const [mapState, setMapState] = useState<'loading' | 'ready' | 'error'>(
     'loading',
@@ -541,6 +547,60 @@ export function CommutePlanner() {
         anchor.setMap(map);
         overlaysRef.current.push(anchor);
       }
+
+      const routePolylines = (
+        [
+          {
+            result: data.directions.to,
+            color: '#18765d',
+            strokeWeight: 7,
+            zIndex: 33,
+          },
+          {
+            result: data.directions.from,
+            color: '#e45b43',
+            strokeWeight: 4,
+            zIndex: 34,
+          },
+        ] as const
+      ).flatMap(({ result, color, strokeWeight, zIndex }) =>
+        (result.farthest?.routeGeometry ?? []).map(
+          (segment) =>
+            new AMap.Polyline({
+              map,
+              path: segment.path,
+              zIndex,
+              isOutline: true,
+              outlineColor: '#ffffff',
+              borderWeight: 1,
+              strokeColor: color,
+              strokeOpacity: segment.mode === 'WALK' ? 0.75 : 0.92,
+              strokeWeight:
+                segment.mode === 'WALK'
+                  ? Math.max(2, strokeWeight - 2)
+                  : strokeWeight,
+              strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
+              lineJoin: 'round',
+              lineCap: 'round',
+            }),
+        ),
+      );
+      overlaysRef.current.push(...routePolylines);
+
+      const startMarkers = stations
+        .filter((station) => selectedStationIds.includes(station.id))
+        .map(
+          (station) =>
+            new AMap.Marker({
+              map,
+              position: parseLocation(station.location),
+              anchor: 'center',
+              zIndex: 120,
+              title: `接驳起始站：${station.name}`,
+              content: '<span class="route-start-marker">起</span>',
+            }),
+        );
+      overlaysRef.current.push(...startMarkers);
 
       const markerStations = new Map<
         string,
@@ -1001,7 +1061,13 @@ export function CommutePlanner() {
                   <strong>{reachability.candidateCount}</strong>候选站点
                 </span>
                 <span>
+                  <strong>{reachability.lineQueryCount}</strong>线路查询
+                </span>
+                <span>
                   <strong>{reachability.expandedLineCount}</strong>线路方向
+                </span>
+                <span>
+                  <strong>{reachability.routeCheckCount}</strong>路线核验
                 </span>
                 <span>
                   <strong>
@@ -1175,10 +1241,20 @@ export function CommutePlanner() {
               公交站
             </span>
             {reachabilityState === 'ready' && (
-              <span>
-                <i className="legend-farthest" />
-                最远可达
-              </span>
+              <>
+                <span>
+                  <i className="legend-farthest" />
+                  最远可达
+                </span>
+                <span>
+                  <i className="legend-route-to" />
+                  去公司路线
+                </span>
+                <span>
+                  <i className="legend-route-from" />
+                  回住处路线
+                </span>
+              </>
             )}
           </div>
           <div className="map-context-card">

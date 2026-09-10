@@ -1019,6 +1019,8 @@ input {
   right: 20px;
   bottom: 20px;
   display: flex;
+  max-width: calc(100% - 40px);
+  flex-wrap: wrap;
   gap: 15px;
   border-radius: 12px;
   padding: 10px 13px;
@@ -1048,6 +1050,18 @@ input {
 .legend-farthest {
   background: #f3a327;
   box-shadow: 0 0 0 3px rgba(243, 163, 39, 0.2);
+}
+.map-legend i.legend-route-to,
+.map-legend i.legend-route-from {
+  width: 18px;
+  height: 3px;
+  border-radius: 999px;
+}
+.legend-route-to {
+  background: #18765d;
+}
+.legend-route-from {
+  background: #e45b43;
 }
 .map-context-card {
   top: 20px;
@@ -1152,6 +1166,21 @@ input {
 .reachable-map-marker em {
   font-size: 9px;
   font-style: normal;
+  font-weight: 800;
+}
+.route-start-marker {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 3px solid #fff;
+  border-radius: 10px;
+  background: #173f34;
+  box-shadow:
+    0 4px 12px rgba(23, 63, 52, 0.34),
+    0 0 0 3px rgba(23, 63, 52, 0.15);
+  color: #fff;
+  font-size: 11px;
   font-weight: 800;
 }
 

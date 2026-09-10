@@ -71,7 +71,12 @@ type TransitResponse = {
     transits?: Array<{
       cost?: { duration?: string };
       segments?: Array<{
-        bus?: { buslines?: Array<{ name?: string }> };
+        walking?: {
+          steps?: Array<{ polyline?: unknown }>;
+        };
+        bus?: {
+          buslines?: Array<{ name?: string; polyline?: unknown }>;
+        };
       }>;
     }>;
   };
@@ -101,6 +106,11 @@ type CandidateStation = {
   adcode: string;
 };
 
+type RouteGeometrySegment = {
+  mode: 'WALK' | 'TRANSIT';
+  path: Array<[number, number]>;
+};
+
 type ReachableStation = CandidateStation & {
   transitDurationSeconds: number;
   transitDurationMinutes: number;
@@ -110,6 +120,7 @@ type ReachableStation = CandidateStation & {
   segmentCount: number;
   routeLines: string[];
   matchedLines: string[];
+  routeGeometry: RouteGeometrySegment[];
   accessStation: {
     id: string;
     name: string;
@@ -222,6 +233,50 @@ function routeMatchesAllowedLines(
         normalizedAllowedLine.includes(routeLine),
     );
   });
+}
+
+function polylineText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (
+    value &&
+    typeof value === 'object' &&
+    'polyline' in value &&
+    typeof value.polyline === 'string'
+  ) {
+    return value.polyline;
+  }
+  return '';
+}
+
+function parsePolyline(value: unknown) {
+  return polylineText(value)
+    .split(';')
+    .map((point) => point.split(',').map(Number))
+    .filter(
+      (point): point is [number, number] =>
+        point.length === 2 &&
+        Number.isFinite(point[0]) &&
+        Number.isFinite(point[1]),
+    );
+}
+
+function collectRouteGeometry(
+  segments: NonNullable<
+    NonNullable<TransitResponse['route']>['transits']
+  >[number]['segments'],
+) {
+  const geometry: RouteGeometrySegment[] = [];
+  for (const segment of segments ?? []) {
+    for (const step of segment.walking?.steps ?? []) {
+      const path = parsePolyline(step.polyline);
+      if (path.length > 1) geometry.push({ mode: 'WALK', path });
+    }
+    for (const busline of segment.bus?.buslines ?? []) {
+      const path = parsePolyline(busline.polyline);
+      if (path.length > 1) geometry.push({ mode: 'TRANSIT', path });
+    }
+  }
+  return geometry;
 }
 
 function selectEvenly<T>(items: T[], limit: number) {
@@ -338,7 +393,7 @@ async function planWalking(
     const result = await amapRequest<WalkingResponse>(
       '/v5/direction/walking',
       params,
-      { retries: 0, timeoutMilliseconds: 8_000 },
+      { retries: 1, timeoutMilliseconds: 8_000 },
     );
     const paths = (result.route?.paths ?? [])
       .map((path) => ({
@@ -381,6 +436,7 @@ async function planTransit(
   segmentCount: number;
   routeLines: string[];
   matchedLines: string[];
+  routeGeometry: RouteGeometrySegment[];
   accessStation: ReachableStation['accessStation'];
 } | null> {
   if (!station.citycode || !accessStation.citycode) return null;
@@ -397,7 +453,7 @@ async function planTransit(
     AlternativeRoute: '3',
     date: departureDate,
     time: departureTime.replace(':', '-'),
-    show_fields: 'cost',
+    show_fields: 'cost,polyline',
   });
 
   try {
@@ -428,6 +484,7 @@ async function planTransit(
           segmentCount: route.segments?.length ?? 0,
           routeLines,
           matchedLines,
+          routeGeometry: collectRouteGeometry(route.segments),
           accessStation: {
             id: accessStation.id,
             name: accessStation.name,
@@ -508,6 +565,7 @@ async function evaluateDirection(
     segmentCount: route.segmentCount,
     routeLines: route.routeLines,
     matchedLines: route.matchedLines,
+    routeGeometry: route.routeGeometry,
     accessStation: route.accessStation,
   }));
   const reachable = evaluated
@@ -525,6 +583,7 @@ async function evaluateDirection(
     )
     .sort((left, right) => left.durationSeconds - right.durationSeconds)
     .slice(0, 3);
+  const farthest = reachable[0] ?? null;
 
   return {
     direction,
@@ -539,9 +598,18 @@ async function evaluateDirection(
               60,
           )
         : null,
-    farthest: reachable[0] ?? null,
-    nearMisses,
-    stations: reachable.slice(0, 12),
+    farthest,
+    nearMisses: nearMisses.map((station) => ({
+      ...station,
+      routeGeometry: [],
+    })),
+    stations: reachable
+      .slice(0, 12)
+      .map((station) =>
+        station.logicalId === farthest?.logicalId
+          ? station
+          : { ...station, routeGeometry: [] },
+      ),
   };
 }
 
