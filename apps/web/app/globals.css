@@ -442,10 +442,58 @@ input {
   background: #fff;
   font-size: 12px;
 }
+.station-range-section {
+  margin-top: 21px;
+}
+.station-range-section > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.station-range-section > div:first-child > span {
+  color: #43504b;
+  font-size: 13px;
+  font-weight: 700;
+}
+.station-range-section > div:first-child > small {
+  color: #87928e;
+  font-size: 10px;
+}
+.station-range-control[data-slot='radio-group'] {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 9px;
+  border-radius: 12px;
+  background: #edf1ef;
+  padding: 4px;
+}
+.station-range-control label {
+  position: relative;
+  display: flex;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  color: #6e7a75;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+.station-range-control label:has([data-checked]) {
+  background: #fff;
+  color: #173f34;
+  box-shadow: 0 2px 8px rgba(23, 32, 29, 0.08);
+}
+.station-range-control [data-slot='radio-group-item'] {
+  position: absolute;
+  opacity: 0;
+}
 .primary-action {
   width: 100%;
   height: 47px;
-  margin-top: 23px;
+  margin-top: 16px;
   border-radius: 13px;
   background: #e8533f;
   font-size: 14px;

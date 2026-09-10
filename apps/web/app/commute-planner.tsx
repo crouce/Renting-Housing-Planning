@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Slider } from '@/components/ui/slider';
 
 type PlaceTip = {
@@ -169,6 +170,7 @@ export function CommutePlanner() {
   const [selectedPlace, setSelectedPlace] = useState<PlaceTip | null>(null);
   const [stations, setStations] = useState<Station[]>([]);
   const [showAllStations, setShowAllStations] = useState(false);
+  const [stationRadius, setStationRadius] = useState<500 | 1000 | 1500>(500);
   const [stationState, setStationState] = useState<
     'idle' | 'loading' | 'ready' | 'error'
   >('idle');
@@ -343,6 +345,20 @@ export function CommutePlanner() {
     setReachabilityState('idle');
   }
 
+  function resetNearbyStations() {
+    setStations([]);
+    setShowAllStations(false);
+    setStationState('idle');
+    resetReachability();
+
+    const map = mapRef.current;
+    clearMapOverlays();
+    if (map && anchorMarkerRef.current) {
+      anchorMarkerRef.current.setMap(map);
+      overlaysRef.current.push(anchorMarkerRef.current);
+    }
+  }
+
   function selectPlace(place: PlaceTip) {
     setSelectedPlace(place);
     setQuery(place.name);
@@ -377,7 +393,7 @@ export function CommutePlanner() {
 
     try {
       const response = await fetch(
-        `/api/amap/stations?location=${encodeURIComponent(selectedPlace.location)}&radius=1500`,
+        `/api/amap/stations?location=${encodeURIComponent(selectedPlace.location)}&radius=${stationRadius}`,
       );
       if (!response.ok) throw new Error('Station search failed');
       const data = (await response.json()) as { stations: Station[] };
@@ -646,6 +662,43 @@ export function CommutePlanner() {
             </div>
           </div>
 
+          <div className="station-range-section">
+            <div>
+              <span>附近站点范围</span>
+              <small>建议先从 500 米开始，不够再扩大</small>
+            </div>
+            <RadioGroup
+              className="station-range-control"
+              value={String(stationRadius)}
+              onValueChange={(value) => {
+                const nextRadius = Number(value);
+                if (
+                  nextRadius === 500 ||
+                  nextRadius === 1000 ||
+                  nextRadius === 1500
+                ) {
+                  setStationRadius(nextRadius);
+                  resetNearbyStations();
+                }
+              }}
+              aria-label="附近站点搜索范围"
+            >
+              {[
+                { value: 500, label: '500 米' },
+                { value: 1000, label: '1 公里' },
+                { value: 1500, label: '1.5 公里' },
+              ].map((option) => (
+                <label key={option.value}>
+                  <RadioGroupItem
+                    value={String(option.value)}
+                    disabled={stationState === 'loading'}
+                  />
+                  <span>{option.label}</span>
+                </label>
+              ))}
+            </RadioGroup>
+          </div>
+
           <Button
             size="lg"
             className="primary-action"
@@ -673,7 +726,14 @@ export function CommutePlanner() {
               <div className="result-heading">
                 <div>
                   <span className="step-kicker">03 · 附近站点</span>
-                  <strong>1.5 公里内找到 {stations.length} 个站点</strong>
+                  <strong>
+                    {stationRadius === 500
+                      ? '500 米'
+                      : stationRadius === 1000
+                        ? '1 公里'
+                        : '1.5 公里'}
+                    内找到 {stations.length} 个站点
+                  </strong>
                 </div>
                 <Sparkles aria-hidden="true" />
               </div>
