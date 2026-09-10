@@ -75,11 +75,25 @@ type TransitResponse = {
           steps?: Array<{ polyline?: unknown }>;
         };
         bus?: {
-          buslines?: Array<{ name?: string; polyline?: unknown }>;
+          buslines?: Array<{
+            id?: string;
+            name?: string;
+            type?: string;
+            polyline?: unknown;
+            departure_stop?: AMapTransitStop;
+            via_stops?: AMapTransitStop[];
+            arrival_stop?: AMapTransitStop;
+          }>;
         };
       }>;
     }>;
   };
+};
+
+type AMapTransitStop = {
+  id?: string;
+  name?: string;
+  location?: string;
 };
 
 type WalkingResponse = {
@@ -109,6 +123,15 @@ type CandidateStation = {
 type RouteGeometrySegment = {
   mode: 'WALK' | 'TRANSIT';
   path: Array<[number, number]>;
+  lineId?: string;
+  lineName?: string;
+  transitMode?: TransitMode;
+  stops: Array<{
+    id: string;
+    name: string;
+    location: [number, number];
+    role: 'BOARD' | 'VIA' | 'ALIGHT';
+  }>;
 };
 
 type ReachableStation = CandidateStation & {
@@ -213,7 +236,10 @@ function normalizeLineName(line: string) {
 }
 
 function lineMode(line: AMapBusLine): TransitMode {
-  const description = `${line.type ?? ''} ${line.name ?? ''}`;
+  return transitMode(`${line.type ?? ''} ${line.name ?? ''}`);
+}
+
+function transitMode(description: string): TransitMode {
   if (/有轨电车|轻轨/.test(description)) return 'LIGHT_RAIL';
   if (/地铁|轨道交通/.test(description)) return 'SUBWAY';
   return 'BUS';
@@ -269,11 +295,43 @@ function collectRouteGeometry(
   for (const segment of segments ?? []) {
     for (const step of segment.walking?.steps ?? []) {
       const path = parsePolyline(step.polyline);
-      if (path.length > 1) geometry.push({ mode: 'WALK', path });
+      if (path.length > 1) geometry.push({ mode: 'WALK', path, stops: [] });
     }
     for (const busline of segment.bus?.buslines ?? []) {
       const path = parsePolyline(busline.polyline);
-      if (path.length > 1) geometry.push({ mode: 'TRANSIT', path });
+      if (path.length < 2) continue;
+      const stops = [
+        { stop: busline.departure_stop, role: 'BOARD' as const },
+        ...(busline.via_stops ?? []).map((stop) => ({
+          stop,
+          role: 'VIA' as const,
+        })),
+        { stop: busline.arrival_stop, role: 'ALIGHT' as const },
+      ].flatMap(({ stop, role }) => {
+        if (
+          !stop?.name ||
+          !stop.location ||
+          !locationPattern.test(stop.location)
+        ) {
+          return [];
+        }
+        return [
+          {
+            id: stop.id ?? `${stop.name}:${stop.location}`,
+            name: stop.name,
+            location: parseLocation(stop.location),
+            role,
+          },
+        ];
+      });
+      geometry.push({
+        mode: 'TRANSIT',
+        path,
+        lineId: busline.id,
+        lineName: busline.name?.trim(),
+        transitMode: transitMode(`${busline.type ?? ''} ${busline.name ?? ''}`),
+        stops,
+      });
     }
   }
   return geometry;

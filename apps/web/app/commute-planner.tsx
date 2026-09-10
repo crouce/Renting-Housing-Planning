@@ -53,10 +53,7 @@ type ReachableStation = Station & {
   segmentCount: number;
   routeLines: string[];
   matchedLines: string[];
-  routeGeometry: Array<{
-    mode: 'WALK' | 'TRANSIT';
-    path: Array<[number, number]>;
-  }>;
+  routeGeometry: RouteGeometrySegment[];
   accessStation: {
     id: string;
     name: string;
@@ -65,6 +62,20 @@ type ReachableStation = Station & {
     remainingTransitSeconds: number;
     remainingTransitMinutes: number;
   };
+};
+
+type RouteGeometrySegment = {
+  mode: 'WALK' | 'TRANSIT';
+  path: Array<[number, number]>;
+  lineId?: string;
+  lineName?: string;
+  transitMode?: Station['mode'];
+  stops: Array<{
+    id: string;
+    name: string;
+    location: [number, number];
+    role: 'BOARD' | 'VIA' | 'ALIGHT';
+  }>;
 };
 
 type DirectionReachability = {
@@ -151,6 +162,40 @@ declare global {
 }
 
 const DEFAULT_CENTER: [number, number] = [121.4737, 31.2304];
+const ROUTE_PALETTES = {
+  to: ['#126b55', '#167c96', '#315fa8', '#6250a8'],
+  from: ['#d9503f', '#d87924', '#a94d83', '#754fa3'],
+} as const;
+const WALKING_ROUTE_COLORS = { to: '#18765d', from: '#e45b43' } as const;
+
+function displayLineName(lineName?: string) {
+  return lineName?.split('(')[0].trim() || '公共交通';
+}
+
+function routeVisuals(result: DirectionReachability, direction: 'to' | 'from') {
+  const lineColors = new Map<string, string>();
+  return (result.farthest?.routeGeometry ?? []).map((segment, index) => {
+    if (segment.mode === 'WALK') {
+      return {
+        segment,
+        color: WALKING_ROUTE_COLORS[direction],
+        lineKey: `${direction}:walk:${index}`,
+        lineLabel: '换乘步行',
+      };
+    }
+    const lineKey = `${direction}:${segment.lineId ?? segment.lineName ?? index}`;
+    if (!lineColors.has(lineKey)) {
+      const palette = ROUTE_PALETTES[direction];
+      lineColors.set(lineKey, palette[lineColors.size % palette.length]);
+    }
+    return {
+      segment,
+      color: lineColors.get(lineKey)!,
+      lineKey,
+      lineLabel: displayLineName(segment.lineName),
+    };
+  });
+}
 
 function parseLocation(location: string): [number, number] {
   const [longitude, latitude] = location.split(',').map(Number);
@@ -548,44 +593,110 @@ export function CommutePlanner() {
         overlaysRef.current.push(anchor);
       }
 
-      const routePolylines = (
-        [
-          {
-            result: data.directions.to,
-            color: '#18765d',
-            strokeWeight: 7,
-            zIndex: 33,
-          },
-          {
-            result: data.directions.from,
-            color: '#e45b43',
-            strokeWeight: 4,
-            zIndex: 34,
-          },
-        ] as const
-      ).flatMap(({ result, color, strokeWeight, zIndex }) =>
-        (result.farthest?.routeGeometry ?? []).map(
-          (segment) =>
-            new AMap.Polyline({
-              map,
-              path: segment.path,
-              zIndex,
-              isOutline: true,
-              outlineColor: '#ffffff',
-              borderWeight: 1,
-              strokeColor: color,
-              strokeOpacity: segment.mode === 'WALK' ? 0.75 : 0.92,
-              strokeWeight:
-                segment.mode === 'WALK'
-                  ? Math.max(2, strokeWeight - 2)
-                  : strokeWeight,
-              strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
-              lineJoin: 'round',
-              lineCap: 'round',
-            }),
-        ),
+      const routeDirections = [
+        {
+          direction: 'to',
+          result: data.directions.to,
+          strokeWeight: 7,
+          zIndex: 33,
+        },
+        {
+          direction: 'from',
+          result: data.directions.from,
+          strokeWeight: 4,
+          zIndex: 34,
+        },
+      ] as const;
+      const routeSegments = routeDirections.flatMap(
+        ({ direction, result, strokeWeight, zIndex }) =>
+          routeVisuals(result, direction).map((visual) => ({
+            ...visual,
+            direction,
+            strokeWeight,
+            zIndex,
+          })),
+      );
+      const routePolylines = routeSegments.map(
+        ({ segment, color, strokeWeight, zIndex }) =>
+          new AMap.Polyline({
+            map,
+            path: segment.path,
+            zIndex,
+            isOutline: true,
+            outlineColor: '#ffffff',
+            borderWeight: 1,
+            strokeColor: color,
+            strokeOpacity: segment.mode === 'WALK' ? 0.75 : 0.92,
+            strokeWeight:
+              segment.mode === 'WALK'
+                ? Math.max(2, strokeWeight - 2)
+                : strokeWeight,
+            strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
+            lineJoin: 'round',
+            lineCap: 'round',
+          }),
       );
       overlaysRef.current.push(...routePolylines);
+
+      const routeStops = new Map<
+        string,
+        {
+          name: string;
+          location: [number, number];
+          roles: Set<RouteGeometrySegment['stops'][number]['role']>;
+          lines: Map<string, { label: string; color: string }>;
+        }
+      >();
+      for (const visual of routeSegments) {
+        if (visual.segment.mode !== 'TRANSIT') continue;
+        for (const stop of visual.segment.stops) {
+          const key = stop.id || `${stop.name}:${stop.location.join(',')}`;
+          const current = routeStops.get(key) ?? {
+            name: stop.name,
+            location: stop.location,
+            roles: new Set(),
+            lines: new Map(),
+          };
+          current.roles.add(stop.role);
+          current.lines.set(visual.lineKey, {
+            label: `${visual.direction === 'to' ? '去' : '回'}·${visual.lineLabel}`,
+            color: visual.color,
+          });
+          routeStops.set(key, current);
+        }
+      }
+      const routeStopMarkers = [...routeStops.values()].map((stop) => {
+        const content = document.createElement('div');
+        content.className = `route-stop-marker${
+          stop.roles.has('BOARD') || stop.roles.has('ALIGHT')
+            ? ' is-transfer'
+            : ''
+        }`;
+        const dot = document.createElement('i');
+        const label = document.createElement('span');
+        label.textContent = stop.name;
+        const lines = document.createElement('small');
+        for (const line of stop.lines.values()) {
+          const badge = document.createElement('b');
+          badge.textContent = line.label;
+          badge.style.setProperty('--route-line-color', line.color);
+          lines.appendChild(badge);
+        }
+        content.appendChild(dot);
+        content.appendChild(label);
+        content.appendChild(lines);
+        return new AMap.Marker({
+          map,
+          position: stop.location,
+          anchor: 'bottom-center',
+          zIndex: 92,
+          title: `${stop.name} · ${[...stop.lines.values()]
+            .map((line) => line.label)
+            .join(' / ')}`,
+          content,
+        });
+      });
+      overlaysRef.current.push(...routeStopMarkers);
 
       const startMarkers = stations
         .filter((station) => selectedStationIds.includes(station.id))
@@ -659,6 +770,22 @@ export function CommutePlanner() {
         .filter(Boolean)
         .join(' · ')
     : '';
+  const routeLineLegend = reachability
+    ? (['to', 'from'] as const).flatMap((direction) => {
+        const seen = new Set<string>();
+        return routeVisuals(reachability.directions[direction], direction)
+          .filter(({ segment, lineKey }) => {
+            if (segment.mode !== 'TRANSIT' || seen.has(lineKey)) return false;
+            seen.add(lineKey);
+            return true;
+          })
+          .map(({ lineKey, lineLabel, color }) => ({
+            key: lineKey,
+            label: `${direction === 'to' ? '去' : '回'}·${lineLabel}`,
+            color,
+          }));
+      })
+    : [];
 
   return (
     <main className="planner-shell">
@@ -1246,14 +1373,15 @@ export function CommutePlanner() {
                   <i className="legend-farthest" />
                   最远可达
                 </span>
-                <span>
-                  <i className="legend-route-to" />
-                  去公司路线
-                </span>
-                <span>
-                  <i className="legend-route-from" />
-                  回住处路线
-                </span>
+                {routeLineLegend.map((line) => (
+                  <span key={line.key} title={line.label}>
+                    <i
+                      className="legend-route-line"
+                      style={{ backgroundColor: line.color }}
+                    />
+                    {line.label}
+                  </span>
+                ))}
               </>
             )}
           </div>
