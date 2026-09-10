@@ -18,6 +18,7 @@ import {
   Trophy,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Slider } from '@/components/ui/slider';
@@ -50,6 +51,14 @@ type ReachableStation = Station & {
   durationMinutes: number;
   straightLineMeters: number;
   segmentCount: number;
+  routeLines: string[];
+  matchedLines: string[];
+  accessStation: {
+    id: string;
+    name: string;
+    walkingDistanceMeters: number;
+    walkingMinutes: number;
+  };
 };
 
 type ReachabilityResult = {
@@ -57,6 +66,8 @@ type ReachabilityResult = {
   budgetMinutes: number;
   scanRadiusMeters: number;
   candidateCount: number;
+  routeCheckCount: number;
+  selectedAccessStationCount: number;
   checkedCount: number;
   failedCount: number;
   reachableCount: number;
@@ -171,6 +182,8 @@ export function CommutePlanner() {
   const [stations, setStations] = useState<Station[]>([]);
   const [showAllStations, setShowAllStations] = useState(false);
   const [stationRadius, setStationRadius] = useState<500 | 1000 | 1500>(500);
+  const [selectedStationIds, setSelectedStationIds] = useState<string[]>([]);
+  const [selectedLineKeys, setSelectedLineKeys] = useState<string[]>([]);
   const [stationState, setStationState] = useState<
     'idle' | 'loading' | 'ready' | 'error'
   >('idle');
@@ -232,6 +245,8 @@ export function CommutePlanner() {
 
             setSelectedPlace(null);
             setStations([]);
+            setSelectedStationIds([]);
+            setSelectedLineKeys([]);
             setShowAllStations(false);
             setStationState('idle');
             setReachability(null);
@@ -349,6 +364,8 @@ export function CommutePlanner() {
     setStations([]);
     setShowAllStations(false);
     setStationState('idle');
+    setSelectedStationIds([]);
+    setSelectedLineKeys([]);
     resetReachability();
 
     const map = mapRef.current;
@@ -359,12 +376,44 @@ export function CommutePlanner() {
     }
   }
 
+  function stationLineKey(stationId: string, line: string) {
+    return `${stationId}::${line}`;
+  }
+
+  function setStationSelected(stationId: string, selected: boolean) {
+    setSelectedStationIds((current) => {
+      if (selected) {
+        if (current.includes(stationId) || current.length >= 3) return current;
+        return [...current, stationId];
+      }
+      return current.filter((id) => id !== stationId);
+    });
+    if (!selected) {
+      setSelectedLineKeys((current) =>
+        current.filter((key) => !key.startsWith(`${stationId}::`)),
+      );
+    }
+    resetReachability();
+  }
+
+  function toggleStationLine(stationId: string, line: string) {
+    const key = stationLineKey(stationId, line);
+    setSelectedLineKeys((current) =>
+      current.includes(key)
+        ? current.filter((value) => value !== key)
+        : [...current, key],
+    );
+    resetReachability();
+  }
+
   function selectPlace(place: PlaceTip) {
     setSelectedPlace(place);
     setQuery(place.name);
     setTips([]);
     setStations([]);
     setShowAllStations(false);
+    setSelectedStationIds([]);
+    setSelectedLineKeys([]);
     setStationState('idle');
     resetReachability();
     clearMapOverlays();
@@ -398,6 +447,8 @@ export function CommutePlanner() {
       if (!response.ok) throw new Error('Station search failed');
       const data = (await response.json()) as { stations: Station[] };
       setStations(data.stations);
+      setSelectedStationIds(data.stations[0] ? [data.stations[0].id] : []);
+      setSelectedLineKeys([]);
       setStationState('ready');
 
       const AMap = amapRef.current;
@@ -428,7 +479,7 @@ export function CommutePlanner() {
   }
 
   async function calculateReachability() {
-    if (!selectedPlace) return;
+    if (!selectedPlace || selectedStationIds.length === 0) return;
     setReachabilityState('loading');
     setReachability(null);
 
@@ -446,6 +497,18 @@ export function CommutePlanner() {
           direction,
           departureDate,
           departureTime,
+          accessStations: stations
+            .filter((station) => selectedStationIds.includes(station.id))
+            .map((station) => ({
+              id: station.id,
+              name: station.name,
+              location: station.location,
+              citycode: station.citycode,
+              distanceMeters: station.distanceMeters,
+              allowedLines: station.lines.filter((line) =>
+                selectedLineKeys.includes(stationLineKey(station.id, line)),
+              ),
+            })),
         }),
       });
       if (!response.ok) throw new Error('Reachability scan failed');
@@ -530,6 +593,8 @@ export function CommutePlanner() {
                   if (selectedPlace?.name !== event.target.value) {
                     setSelectedPlace(null);
                     setStations([]);
+                    setSelectedStationIds([]);
+                    setSelectedLineKeys([]);
                     setShowAllStations(false);
                     resetReachability();
                     clearMapOverlays();
@@ -747,45 +812,89 @@ export function CommutePlanner() {
                   公交 {groupedStations.bus.length}
                 </span>
               </div>
+              <div className="station-selection-summary">
+                <strong>已选 {selectedStationIds.length} / 3 个接驳站点</strong>
+                <small>选中线路会限定路线；不选线路表示允许该站全部线路</small>
+              </div>
               <div className="station-list">
                 {(showAllStations ? stations : stations.slice(0, 6)).map(
-                  (station, index) => (
-                    <button
-                      type="button"
-                      key={station.id}
-                      onClick={() => {
-                        mapRef.current?.setCenter(
-                          parseLocation(station.location),
-                        );
-                        mapRef.current?.setZoom(17);
-                      }}
-                    >
-                      <span
-                        className={`station-mode ${station.mode.toLowerCase()}`}
+                  (station, index) => {
+                    const isSelected = selectedStationIds.includes(station.id);
+                    const visibleLines = isSelected
+                      ? station.lines
+                      : station.lines.slice(0, 3);
+                    return (
+                      <div
+                        key={station.id}
+                        className={`station-list-row${isSelected ? ' is-selected' : ''}`}
                       >
-                        <b>{index + 1}</b>
-                      </span>
-                      <span className="station-detail-copy">
-                        <strong>{station.name}</strong>
-                        <small>直线距离 {station.distanceMeters} 米</small>
-                        <span className="station-line-chips">
-                          {station.lines.length > 0 ? (
+                        <Checkbox
+                          className="station-select-checkbox"
+                          checked={isSelected}
+                          disabled={
+                            !isSelected && selectedStationIds.length >= 3
+                          }
+                          onCheckedChange={(checked) =>
+                            setStationSelected(station.id, checked === true)
+                          }
+                          aria-label={`${isSelected ? '取消选择' : '选择'}${station.name}`}
+                        />
+                        <button
+                          type="button"
+                          className="station-focus-action"
+                          onClick={() => {
+                            mapRef.current?.setCenter(
+                              parseLocation(station.location),
+                            );
+                            mapRef.current?.setZoom(17);
+                          }}
+                        >
+                          <span
+                            className={`station-mode ${station.mode.toLowerCase()}`}
+                          >
+                            <b>{index + 1}</b>
+                          </span>
+                          <span className="station-detail-copy">
+                            <strong>{station.name}</strong>
+                            <small>直线距离 {station.distanceMeters} 米</small>
+                          </span>
+                          <ChevronRight />
+                        </button>
+                        <div className="station-line-chips is-selectable">
+                          {visibleLines.length > 0 ? (
                             <>
-                              {station.lines.slice(0, 3).map((line) => (
-                                <i key={line}>{line}</i>
-                              ))}
-                              {station.lines.length > 3 && (
-                                <i>+{station.lines.length - 3}</i>
+                              {visibleLines.map((line) => {
+                                const lineSelected = selectedLineKeys.includes(
+                                  stationLineKey(station.id, line),
+                                );
+                                return (
+                                  <button
+                                    type="button"
+                                    key={line}
+                                    disabled={!isSelected}
+                                    className={
+                                      lineSelected ? 'is-selected' : ''
+                                    }
+                                    aria-pressed={lineSelected}
+                                    onClick={() =>
+                                      toggleStationLine(station.id, line)
+                                    }
+                                  >
+                                    {line}
+                                  </button>
+                                );
+                              })}
+                              {!isSelected && station.lines.length > 3 && (
+                                <span>+{station.lines.length - 3}</span>
                               )}
                             </>
                           ) : (
-                            <i className="is-empty">暂无线路信息</i>
+                            <span className="is-empty">暂无线路信息</span>
                           )}
-                        </span>
-                      </span>
-                      <ChevronRight />
-                    </button>
-                  ),
+                        </div>
+                      </div>
+                    );
+                  },
                 )}
               </div>
               {stations.length > 6 && (
@@ -803,13 +912,18 @@ export function CommutePlanner() {
               <Button
                 size="lg"
                 className="calculate-action"
-                disabled={reachabilityState === 'loading'}
+                disabled={
+                  reachabilityState === 'loading' ||
+                  selectedStationIds.length === 0
+                }
                 onClick={calculateReachability}
               >
                 <Radar />
                 {reachabilityState === 'loading'
                   ? '正在规划候选路线…'
-                  : `计算 ${budget} 分钟通勤圈`}
+                  : selectedStationIds.length === 0
+                    ? '请先选择接驳站点'
+                    : `按 ${selectedStationIds.length} 个站点计算 ${budget} 分钟通勤圈`}
               </Button>
 
               {reachabilityState === 'loading' && (
@@ -817,7 +931,9 @@ export function CommutePlanner() {
                   <span className="search-spinner" />
                   <div>
                     <strong>正在扫描 8 个方向</strong>
-                    <small>批量比较候选站点路线，通常需要 10～30 秒。</small>
+                    <small>
+                      按选定站点和线路核验候选路线，通常需要 10～40 秒。
+                    </small>
                   </div>
                 </output>
               )}
@@ -860,6 +976,10 @@ export function CommutePlanner() {
                       ).toFixed(1)}{' '}
                       公里
                     </span>
+                    <span className="route-access-note">
+                      经 {reachability.farthest.accessStation.name} · 接驳步行约{' '}
+                      {reachability.farthest.accessStation.walkingMinutes} 分钟
+                    </span>
                   </div>
                 </div>
               )}
@@ -877,16 +997,23 @@ export function CommutePlanner() {
                       超出当前预算
                       {reachability.nearMisses[0].durationMinutes - budget} 分钟
                     </span>
+                    <span className="route-access-note">
+                      经 {reachability.nearMisses[0].accessStation.name}
+                    </span>
                   </div>
                 </div>
               )}
 
               <div className="scan-metrics">
                 <span>
+                  <strong>{reachability.selectedAccessStationCount}</strong>
+                  接驳站点
+                </span>
+                <span>
                   <strong>{reachability.candidateCount}</strong>候选站点
                 </span>
                 <span>
-                  <strong>{reachability.checkedCount}</strong>有效路线
+                  <strong>{reachability.routeCheckCount}</strong>路线核验
                 </span>
                 <span>
                   <strong>
@@ -915,6 +1042,10 @@ export function CommutePlanner() {
                         直线 {(station.straightLineMeters / 1000).toFixed(1)}{' '}
                         公里
                       </small>
+                      <small>
+                        经 {station.accessStation.name} · 步行约{' '}
+                        {station.accessStation.walkingMinutes} 分钟
+                      </small>
                     </span>
                     <span className="duration-chip">
                       {station.durationMinutes} 分钟
@@ -923,7 +1054,7 @@ export function CommutePlanner() {
                 ))}
               </div>
               <p className="sampling-note">
-                当前结果基于 8 个方向的候选站点抽样，不代表完整等时圈。
+                当前结果基于方向抽样；接驳步行按直线距离估算，不代表完整等时圈。
               </p>
             </div>
           )}

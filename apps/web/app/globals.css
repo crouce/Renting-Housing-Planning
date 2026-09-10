@@ -263,7 +263,7 @@ input {
   box-shadow: 0 20px 50px rgba(23, 32, 29, 0.14);
 }
 .suggestion-list button,
-.station-list button {
+.station-focus-action {
   display: grid;
   width: 100%;
   border: 0;
@@ -565,20 +565,58 @@ input {
   width: 13px;
   height: 13px;
 }
+.station-selection-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+  border-radius: 10px;
+  background: #f3f6f4;
+  padding: 9px 10px;
+}
+.station-selection-summary strong {
+  color: #294c41;
+  font-size: 11px;
+}
+.station-selection-summary small {
+  color: #7b8782;
+  font-size: 9px;
+  line-height: 1.45;
+}
 .station-list {
   margin-top: 10px;
 }
-.station-list button {
+.station-list-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  border-bottom: 1px solid #edf0ee;
+  padding: 7px 3px 8px;
+  transition: background-color 160ms ease;
+}
+.station-list-row.is-selected {
+  margin-inline: -6px;
+  border-bottom-color: transparent;
+  border-radius: 11px;
+  background: #f0f6f3;
+  padding-inline: 9px 6px;
+}
+.station-select-checkbox {
+  grid-column: 1;
+  grid-row: 1;
+}
+.station-focus-action {
+  grid-column: 2;
+  grid-row: 1;
   grid-template-columns: 32px minmax(0, 1fr) 15px;
   gap: 10px;
   align-items: center;
-  padding: 9px 3px;
-  border-bottom: 1px solid #edf0ee;
+  padding: 3px 0;
 }
-.station-list button:hover strong {
+.station-focus-action:hover strong {
   color: #d44936;
 }
-.station-list button > svg {
+.station-focus-action > svg {
   width: 14px;
   color: #a2aaa7;
 }
@@ -602,21 +640,40 @@ input {
   gap: 4px;
   margin-top: 5px;
 }
-.station-line-chips i {
+.station-line-chips button,
+.station-line-chips > span {
   display: block;
   max-width: 92px;
   overflow: hidden;
+  border: 0;
   border-radius: 999px;
   background: #edf3f0;
   padding: 3px 6px;
   color: #396052;
+  cursor: pointer;
   font-size: 9px;
-  font-style: normal;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.station-line-chips i.is-empty {
+.station-line-chips.is-selectable {
+  grid-column: 2;
+  grid-row: 2;
+  margin-top: 4px;
+}
+.station-line-chips button:hover:not(:disabled) {
+  background: #dae9e2;
+}
+.station-line-chips button.is-selected {
+  background: #173f34;
+  color: #fff;
+  box-shadow: 0 2px 7px rgba(23, 63, 52, 0.18);
+}
+.station-line-chips button:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+.station-line-chips > span.is-empty {
   background: #f1f2f1;
   color: #8c9491;
 }
@@ -744,9 +801,14 @@ input {
   color: #806861;
   font-size: 11px;
 }
+.farthest-card div > span.route-access-note {
+  margin-top: 5px;
+  color: #49655b;
+  font-weight: 650;
+}
 .scan-metrics {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 7px;
   margin-top: 10px;
 }
