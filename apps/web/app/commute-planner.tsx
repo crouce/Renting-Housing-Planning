@@ -77,9 +77,12 @@ type DirectionReachability = {
 
 type ReachabilityResult = {
   sampled: true;
+  candidateSource: 'transit_lines';
   budgetMinutes: number;
-  scanRadiusMeters: number;
+  networkSpanMeters: number;
   candidateCount: number;
+  lineQueryCount: number;
+  expandedLineCount: number;
   routeCheckCount: number;
   selectedAccessStationCount: number;
   accessStationBudgets: Array<{
@@ -517,6 +520,7 @@ export function CommutePlanner() {
               location: station.location,
               citycode: station.citycode,
               distanceMeters: station.distanceMeters,
+              availableLines: station.lines,
               allowedLines: station.lines.filter((line) =>
                 selectedLineKeys.includes(stationLineKey(station.id, line)),
               ),
@@ -958,10 +962,9 @@ export function CommutePlanner() {
                 <output className="scan-progress">
                   <span className="search-spinner" />
                   <div>
-                    <strong>正在扫描 8 个方向并核验双向路线</strong>
+                    <strong>正在展开接驳站的线路与完整站序</strong>
                     <small>
-                      先计算步行时间，再按剩余预算核验公交路线，通常需要 15～60
-                      秒。
+                      再按剩余预算核验双向公交路线，通常需要 15～60 秒。
                     </small>
                   </div>
                 </output>
@@ -998,13 +1001,13 @@ export function CommutePlanner() {
                   <strong>{reachability.candidateCount}</strong>候选站点
                 </span>
                 <span>
-                  <strong>{reachability.routeCheckCount}</strong>路线核验
+                  <strong>{reachability.expandedLineCount}</strong>线路方向
                 </span>
                 <span>
                   <strong>
-                    {(reachability.scanRadiusMeters / 1000).toFixed(1)} km
+                    {(reachability.networkSpanMeters / 1000).toFixed(1)} km
                   </strong>
-                  扫描半径
+                  沿线跨度
                 </span>
               </div>
 
@@ -1129,7 +1132,7 @@ export function CommutePlanner() {
                 ))}
               </div>
               <p className="sampling-note">
-                双向分别调用公共交通规划；公交、地铁和有轨电车均可成为候选。当前仍为方向抽样，不代表完整等时圈。
+                候选来自所选接驳站的实际线路站序，再做双向公共交通规划复核；当前为直达线路抽样，不代表完整换乘网络。
               </p>
             </div>
           )}

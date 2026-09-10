@@ -18,6 +18,7 @@ type ReachabilityRequest = {
     location?: string;
     citycode?: string;
     distanceMeters?: number;
+    availableLines?: string[];
     allowedLines?: string[];
   }>;
 };
@@ -28,6 +29,7 @@ type AccessStation = {
   location: string;
   citycode: string;
   distanceMeters: number;
+  availableLines: string[];
   allowedLines: string[];
 };
 
@@ -37,23 +39,28 @@ type AccessStationWithWalk = AccessStation & {
   remainingTransitSeconds: number;
 };
 
-type AMapPoi = {
+type AMapBusStop = {
   id?: string;
-  parent?: string;
   name?: string;
   location?: string;
-  distance?: string;
-  typecode?: string;
-  address?: string;
-  citycode?: string;
-  adcode?: string;
+  sequence?: string;
 };
 
-type AroundResponse = {
+type AMapBusLine = {
+  id?: string;
+  name?: string;
+  type?: string;
+  citycode?: string;
+  start_stop?: string;
+  end_stop?: string;
+  busstops?: AMapBusStop[];
+};
+
+type BusLineResponse = {
   status: string;
   info: string;
   infocode: string;
-  pois?: AMapPoi[];
+  buslines?: AMapBusLine[];
 };
 
 type TransitResponse = {
@@ -136,9 +143,12 @@ type DirectionReachability = {
 
 type ReachabilityResult = {
   sampled: true;
+  candidateSource: 'transit_lines';
   budgetMinutes: number;
-  scanRadiusMeters: number;
+  networkSpanMeters: number;
   candidateCount: number;
+  lineQueryCount: number;
+  expandedLineCount: number;
   routeCheckCount: number;
   selectedAccessStationCount: number;
   accessStationBudgets: AccessStationBudget[];
@@ -158,36 +168,6 @@ const cache = new Map<string, CacheEntry>();
 function parseLocation(location: string): [number, number] {
   const [longitude, latitude] = location.split(',').map(Number);
   return [longitude, latitude];
-}
-
-function formatLocation([longitude, latitude]: [number, number]) {
-  return `${longitude.toFixed(6)},${latitude.toFixed(6)}`;
-}
-
-function destinationPoint(
-  origin: [number, number],
-  distanceMeters: number,
-  bearingDegrees: number,
-): [number, number] {
-  const earthRadius = 6_371_000;
-  const [longitude, latitude] = origin;
-  const angularDistance = distanceMeters / earthRadius;
-  const bearing = (bearingDegrees * Math.PI) / 180;
-  const latitudeRadians = (latitude * Math.PI) / 180;
-  const longitudeRadians = (longitude * Math.PI) / 180;
-  const nextLatitude = Math.asin(
-    Math.sin(latitudeRadians) * Math.cos(angularDistance) +
-      Math.cos(latitudeRadians) * Math.sin(angularDistance) * Math.cos(bearing),
-  );
-  const nextLongitude =
-    longitudeRadians +
-    Math.atan2(
-      Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(latitudeRadians),
-      Math.cos(angularDistance) -
-        Math.sin(latitudeRadians) * Math.sin(nextLatitude),
-    );
-
-  return [(nextLongitude * 180) / Math.PI, (nextLatitude * 180) / Math.PI];
 }
 
 function straightLineDistance(from: string, to: string) {
@@ -213,24 +193,19 @@ function straightLineDistance(from: string, to: string) {
   );
 }
 
-function stationMode(typecode = ''): TransitMode {
-  if (typecode.startsWith('1505')) return 'SUBWAY';
-  if (typecode.startsWith('1506')) return 'LIGHT_RAIL';
-  return 'BUS';
-}
-
-function parseTransitLines(address: string) {
-  return [...new Set(address.split(/[;；]/).map((line) => line.trim()))].filter(
-    Boolean,
-  );
-}
-
 function normalizeLineName(line: string) {
   return line
     .split('(')[0]
     .replaceAll('地铁', '')
     .replaceAll(/\s/g, '')
     .toLowerCase();
+}
+
+function lineMode(line: AMapBusLine): TransitMode {
+  const description = `${line.type ?? ''} ${line.name ?? ''}`;
+  if (/有轨电车|轻轨/.test(description)) return 'LIGHT_RAIL';
+  if (/地铁|轨道交通/.test(description)) return 'SUBWAY';
+  return 'BUS';
 }
 
 function routeMatchesAllowedLines(
@@ -257,50 +232,77 @@ function selectEvenly<T>(items: T[], limit: number) {
   });
 }
 
-function normalizePoi(poi: AMapPoi): CandidateStation | null {
-  if (
-    !poi.id ||
-    !poi.name ||
-    !poi.location ||
-    !locationPattern.test(poi.location)
-  ) {
-    return null;
-  }
-
-  const address = poi.address ?? '';
-  return {
-    id: poi.id,
-    logicalId: poi.parent || poi.id,
-    name: poi.name.replace(/\(公交站\)$/, ''),
-    location: poi.location,
-    mode: stationMode(poi.typecode),
-    address,
-    lines: parseTransitLines(address),
-    citycode: String(poi.citycode ?? ''),
-    adcode: String(poi.adcode ?? ''),
-  };
-}
-
-async function findStationsAround(location: string, radius: number) {
-  const result = await amapRequest<AroundResponse>(
-    '/v5/place/around',
+async function expandTransitLine(lineName: string, citycode: string) {
+  const result = await amapRequest<BusLineResponse>(
+    '/v3/bus/linename',
     new URLSearchParams({
-      location,
-      radius: String(radius),
-      types: '150500|150600|150700',
-      sortrule: 'distance',
-      page_size: '25',
-      show_fields: 'children',
+      keywords: lineName.split('(')[0].trim(),
+      city: citycode,
+      extensions: 'all',
+      offset: '20',
+      page: '1',
     }),
   );
 
-  return (result.pois ?? [])
-    .map(normalizePoi)
-    .filter((station): station is CandidateStation => Boolean(station));
+  const normalizedRequestedName = normalizeLineName(lineName);
+  return (result.buslines ?? []).filter(
+    (line) =>
+      line.id &&
+      line.name &&
+      normalizeLineName(line.name) === normalizedRequestedName &&
+      Array.isArray(line.busstops),
+  );
 }
 
-function selectSectorCandidates(stations: CandidateStation[]) {
-  return stations[0] ? [stations[0]] : [];
+function collectLineCandidates(
+  lines: AMapBusLine[],
+  accessStations: AccessStationWithWalk[],
+  anchorLocation: string,
+) {
+  const candidates = new Map<string, CandidateStation>();
+  for (const line of lines) {
+    const displayLineName = line.name?.split('(')[0].trim() ?? '';
+    for (const stop of line.busstops ?? []) {
+      if (
+        !stop.id ||
+        !stop.name ||
+        !stop.location ||
+        !locationPattern.test(stop.location) ||
+        accessStations.some(
+          (accessStation) =>
+            straightLineDistance(accessStation.location, stop.location!) < 250,
+        )
+      ) {
+        continue;
+      }
+
+      const logicalId = stop.id;
+      const existing = candidates.get(logicalId);
+      if (existing) {
+        if (displayLineName && !existing.lines.includes(displayLineName)) {
+          existing.lines.push(displayLineName);
+        }
+        continue;
+      }
+      candidates.set(logicalId, {
+        id: stop.id,
+        logicalId,
+        name: stop.name,
+        location: stop.location,
+        mode: lineMode(line),
+        address: displayLineName,
+        lines: displayLineName ? [displayLineName] : [],
+        citycode: line.citycode ?? accessStations[0]?.citycode ?? '',
+        adcode: '',
+      });
+    }
+  }
+
+  return [...candidates.values()].sort(
+    (left, right) =>
+      straightLineDistance(anchorLocation, right.location) -
+      straightLineDistance(anchorLocation, left.location),
+  );
 }
 
 async function runThrottled<T, R>(
@@ -596,6 +598,12 @@ export async function POST(request: Request) {
       !Number.isFinite(Number(station.distanceMeters)) ||
       Number(station.distanceMeters) < 0 ||
       Number(station.distanceMeters) > 3_000 ||
+      !Array.isArray(station.availableLines) ||
+      station.availableLines.length > 30 ||
+      station.availableLines.some(
+        (line) =>
+          typeof line !== 'string' || line.length < 1 || line.length > 80,
+      ) ||
       !Array.isArray(station.allowedLines) ||
       station.allowedLines.length > 8 ||
       station.allowedLines.some(
@@ -621,6 +629,9 @@ export async function POST(request: Request) {
       location: station.location!,
       citycode: station.citycode!,
       distanceMeters: Math.round(Number(station.distanceMeters)),
+      availableLines: [
+        ...new Set(station.availableLines!.map((line) => line.trim())),
+      ],
       allowedLines: [
         ...new Set(station.allowedLines!.map((line) => line.trim())),
       ],
@@ -635,7 +646,7 @@ export async function POST(request: Request) {
     ...accessStations
       .map(
         (station) =>
-          `${station.id}:${station.allowedLines.slice().sort().join(',')}`,
+          `${station.id}:${station.availableLines.slice().sort().join(',')}:${station.allowedLines.slice().sort().join(',')}`,
       )
       .sort(),
   ].join('|');
@@ -668,53 +679,75 @@ export async function POST(request: Request) {
     const activeAccessStations = plannedAccessStations.filter(
       (station) => station.remainingTransitSeconds > 0,
     );
-    const maxRemainingTransitMinutes = Math.max(
-      0,
-      ...plannedAccessStations.map((station) =>
-        Math.floor(station.remainingTransitSeconds / 60),
-      ),
-    );
-    const scanRadiusMeters = Math.min(
-      8_000,
-      Math.max(3_000, maxRemainingTransitMinutes * 80),
-    );
-    const sampleSearchRadius = Math.min(
-      4_000,
-      Math.max(2_000, Math.round(scanRadiusMeters * 0.28)),
-    );
-    const anchorCoordinates = parseLocation(anchor.location);
-    const sectorCenters = Array.from({ length: 8 }, (_, index) =>
-      formatLocation(
-        destinationPoint(anchorCoordinates, scanRadiusMeters, index * 45),
-      ),
-    );
-    const sectors = await runThrottled(sectorCenters, 450, async (center) => {
-      try {
-        return await findStationsAround(center, sampleSearchRadius);
-      } catch {
-        return [];
-      }
-    });
-    const anchorCitycode =
-      accessStations.find((station) => station.citycode)?.citycode ??
-      sectors.flat().find((station) => station.citycode)?.citycode ??
-      '';
-    const rawCandidates = sectors.flatMap(selectSectorCandidates);
-    const candidateMap = new Map<string, CandidateStation>();
-    for (const station of rawCandidates) {
-      if (!candidateMap.has(station.logicalId)) {
-        candidateMap.set(station.logicalId, station);
-      }
-      if (candidateMap.size >= 8) break;
-    }
+    const lineSeedMap = new Map<string, { name: string; citycode: string }>();
     for (const station of activeAccessStations) {
-      if (!station.citycode) station.citycode = anchorCitycode;
+      const lineNames =
+        station.allowedLines.length > 0
+          ? station.allowedLines
+          : station.availableLines;
+      for (const lineName of lineNames) {
+        const key = `${station.citycode}:${normalizeLineName(lineName)}`;
+        if (!lineSeedMap.has(key)) {
+          lineSeedMap.set(key, { name: lineName, citycode: station.citycode });
+        }
+      }
+    }
+    const lineSeeds = [...lineSeedMap.values()].slice(0, 8);
+    if (lineSeeds.length === 0) {
+      return Response.json(
+        {
+          error: {
+            code: 'NO_TRANSIT_LINES',
+            message: '所选接驳站点没有可用于扩展的线路信息。',
+          },
+        },
+        { status: 422 },
+      );
+    }
+    const expandedLineGroups = await runThrottled(
+      lineSeeds,
+      250,
+      async (seed) => {
+        try {
+          return await expandTransitLine(seed.name, seed.citycode);
+        } catch {
+          return [];
+        }
+      },
+    );
+    const expandedLineMap = new Map<string, AMapBusLine>();
+    for (const line of expandedLineGroups.flat()) {
+      if (line.id && !expandedLineMap.has(line.id)) {
+        expandedLineMap.set(line.id, line);
+      }
+    }
+    const expandedLines = [...expandedLineMap.values()];
+    const allCandidates = collectLineCandidates(
+      expandedLines,
+      activeAccessStations,
+      validatedAnchor.location,
+    );
+    if (allCandidates.length === 0) {
+      return Response.json(
+        {
+          error: {
+            code: 'NO_LINE_CANDIDATES',
+            message: '没有从所选线路中取得可计算的沿线站点。',
+          },
+        },
+        { status: 422 },
+      );
     }
     const candidateLimit = Math.max(
       4,
       Math.floor(12 / activeAccessStations.length),
     );
-    const candidates = selectEvenly([...candidateMap.values()], candidateLimit);
+    const candidates = selectEvenly(allCandidates, candidateLimit);
+    const networkSpanMeters = Math.max(
+      ...allCandidates.map((station) =>
+        straightLineDistance(validatedAnchor.location, station.location),
+      ),
+    );
 
     const to = await evaluateDirection(
       candidates,
@@ -734,9 +767,12 @@ export async function POST(request: Request) {
     );
     const result: ReachabilityResult = {
       sampled: true,
+      candidateSource: 'transit_lines',
       budgetMinutes,
-      scanRadiusMeters,
+      networkSpanMeters,
       candidateCount: candidates.length,
+      lineQueryCount: lineSeeds.length,
+      expandedLineCount: expandedLines.length,
       routeCheckCount: to.routeCheckCount + from.routeCheckCount,
       selectedAccessStationCount: accessStations.length,
       accessStationBudgets: plannedAccessStations.map((station) => ({
