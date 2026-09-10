@@ -407,6 +407,36 @@ input {
   width: 16px;
   color: #29614f;
 }
+.memory-toggle {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border: 0;
+  border-radius: 999px;
+  background: #aeb9b4;
+  padding: 2px;
+  cursor: pointer;
+  transition: background-color 160ms ease;
+}
+.memory-toggle[aria-checked='true'] {
+  background: #246b56;
+}
+.memory-toggle span {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(23, 32, 29, 0.25);
+  transition: transform 160ms ease;
+}
+.memory-toggle[aria-checked='true'] span {
+  transform: translateX(14px);
+}
+.memory-toggle:focus-visible {
+  outline: 2px solid #e8533f;
+  outline-offset: 2px;
+}
 .local-memory-card strong,
 .local-memory-card small {
   display: block;

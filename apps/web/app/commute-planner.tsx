@@ -23,7 +23,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
-import { Switch } from '@/components/ui/switch';
 import {
   addRecentPlace,
   clearAllLocalMemory,
@@ -1305,10 +1304,14 @@ export function CommutePlanner() {
                 <strong>仅在这台设备记住</strong>
                 <small>5 个地点 · 6 组站点 · 4 次通勤结果，不保存密钥</small>
               </span>
-              <Switch
-                checked={rememberLocally}
+              <button
+                type="button"
+                role="switch"
+                className="memory-toggle"
+                aria-checked={rememberLocally}
                 aria-label="在本机记住工作地点和通勤条件"
-                onCheckedChange={(checked) => {
+                onClick={() => {
+                  const checked = !rememberLocally;
                   setRememberLocally(checked);
                   setLocalMemoryEnabled(checked);
                   if (!checked) {
@@ -1321,7 +1324,9 @@ export function CommutePlanner() {
                     setMemoryMessage('本机记忆已开启');
                   }
                 }}
-              />
+              >
+                <span />
+              </button>
             </div>
             {memoryMessage && <p>{memoryMessage}</p>}
             <button
