@@ -218,7 +218,7 @@ input {
   align-items: center;
   gap: 5px;
   color: #7c8883;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 .recent-place-list > span svg {
@@ -242,7 +242,7 @@ input {
   padding: 6px 9px;
   color: #36594d;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -413,17 +413,17 @@ input {
 }
 .local-memory-card strong {
   color: #294c41;
-  font-size: 11px;
+  font-size: 12px;
 }
 .local-memory-card small {
   margin-top: 1px;
   color: #85908c;
-  font-size: 9px;
+  font-size: 10px;
 }
 .local-memory-card p {
   margin: 7px 0 0 26px;
   color: #557168;
-  font-size: 9px;
+  font-size: 10px;
 }
 .local-memory-card > button {
   display: inline-flex;
@@ -435,7 +435,7 @@ input {
   padding: 0;
   color: #9b5b50;
   cursor: pointer;
-  font-size: 9px;
+  font-size: 10px;
 }
 .local-memory-card > button:disabled {
   color: #a7afac;
@@ -662,7 +662,7 @@ input {
   background: #eaf4ef;
   padding: 7px 9px;
   color: #3c695b;
-  font-size: 10px;
+  font-size: 11px;
 }
 .memory-source-note.is-stale {
   background: #fff3e5;
@@ -674,7 +674,25 @@ input {
 }
 .memory-source-note strong {
   margin-left: auto;
-  font-size: 9px;
+  font-size: 10px;
+}
+.commute-memory-note button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 750;
+}
+.commute-memory-note button svg {
+  width: 10px;
+  height: 10px;
 }
 .station-summary svg {
   width: 13px;

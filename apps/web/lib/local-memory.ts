@@ -14,6 +14,8 @@ export type RememberedPreferences = {
   departureDate: string;
   departureTime: string;
   stationRadius: 500 | 1000 | 1500;
+  selectedStationIds?: string[];
+  selectedLineKeys?: string[];
 };
 
 type PlannerMemory = {
@@ -32,6 +34,8 @@ const COMMUTE_STORE = 'commute-cache';
 export const RECENT_PLACE_LIMIT = 5;
 export const STATION_CACHE_LIMIT = 6;
 export const STATION_CACHE_FRESH_MS = 24 * 60 * 60 * 1000;
+export const COMMUTE_CACHE_LIMIT = 4;
+export const COMMUTE_CACHE_FRESH_MS = 2 * 60 * 60 * 1000;
 export const CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type LocalCacheRecord<T> = {
@@ -222,6 +226,32 @@ async function writeCache<T>(
   }
 }
 
+async function updateCache<T>(
+  storeName: string,
+  key: string,
+  update: (data: T) => T,
+) {
+  if (!isLocalMemoryEnabled()) return;
+  try {
+    const database = await openCacheDatabase();
+    try {
+      const transaction = database.transaction(storeName, 'readwrite');
+      const store = transaction.objectStore(storeName);
+      const record = (await requestResult(
+        store.get(key),
+      )) as LocalCacheRecord<T> | null;
+      if (!record || record.discardAfter <= Date.now()) return;
+      record.data = update(record.data);
+      record.lastAccessedAt = Date.now();
+      store.put(record);
+    } finally {
+      database.close();
+    }
+  } catch {
+    // Cache updates are optional.
+  }
+}
+
 export function readStationCache<T>(key: string) {
   return readCache<T>(STATION_STORE, key);
 }
@@ -234,6 +264,24 @@ export function writeStationCache<T>(key: string, data: T) {
     STATION_CACHE_FRESH_MS,
     STATION_CACHE_LIMIT,
   );
+}
+
+export function readCommuteCache<T>(key: string) {
+  return readCache<T>(COMMUTE_STORE, key);
+}
+
+export function writeCommuteCache<T>(key: string, data: T) {
+  return writeCache(
+    COMMUTE_STORE,
+    key,
+    data,
+    COMMUTE_CACHE_FRESH_MS,
+    COMMUTE_CACHE_LIMIT,
+  );
+}
+
+export function updateCommuteCache<T>(key: string, update: (data: T) => T) {
+  return updateCache(COMMUTE_STORE, key, update);
 }
 
 export async function clearAllLocalMemory() {

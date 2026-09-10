@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Building2,
   BusFront,
@@ -28,9 +28,12 @@ import {
   addRecentPlace,
   clearAllLocalMemory,
   isLocalMemoryEnabled,
+  readCommuteCache,
   readPlannerMemory,
   readStationCache,
   setLocalMemoryEnabled,
+  updateCommuteCache,
+  writeCommuteCache,
   writePlannerMemory,
   writeStationCache,
 } from '@/lib/local-memory';
@@ -126,6 +129,11 @@ type ReachabilityResult = {
     to: DirectionReachability;
   };
   cached?: boolean;
+};
+
+type RememberedCommuteResult = {
+  result: ReachabilityResult;
+  activeRouteId: string | null;
 };
 
 type AMapOverlay = { setMap(map: AMapMap | null): void };
@@ -224,6 +232,25 @@ function stationMemoryKey(place: PlaceTip, radius: number) {
   return `stations:v2:${place.location}:${radius}`;
 }
 
+function commuteMemoryKey(
+  place: PlaceTip,
+  budget: number,
+  departureDate: string,
+  departureTime: string,
+  selectedStationIds: string[],
+  selectedLineKeys: string[],
+) {
+  return [
+    'commute:v4',
+    place.location,
+    budget,
+    departureDate,
+    departureTime,
+    [...selectedStationIds].sort().join(','),
+    [...selectedLineKeys].sort().join(','),
+  ].join('|');
+}
+
 function memoryAgeLabel(savedAt: number) {
   const elapsedMinutes = Math.max(
     0,
@@ -234,6 +261,33 @@ function memoryAgeLabel(savedAt: number) {
   const elapsedHours = Math.floor(elapsedMinutes / 60);
   if (elapsedHours < 24) return `${elapsedHours} 小时前`;
   return `${Math.floor(elapsedHours / 24)} 天前`;
+}
+
+function availableStationChoices(
+  nearbyStations: Station[],
+  stationIds: string[],
+  lineKeys: string[],
+) {
+  const availableIds = new Set(nearbyStations.map((station) => station.id));
+  const selectedIds = stationIds
+    .filter((stationId) => availableIds.has(stationId))
+    .slice(0, 3);
+  if (selectedIds.length === 0 && nearbyStations[0]) {
+    selectedIds.push(nearbyStations[0].id);
+  }
+  const availableLineKeys = new Set(
+    nearbyStations.flatMap((station) =>
+      station.lines.map((line) => `${station.id}::${line}`),
+    ),
+  );
+  return {
+    stationIds: selectedIds,
+    lineKeys: lineKeys.filter(
+      (lineKey) =>
+        availableLineKeys.has(lineKey) &&
+        selectedIds.some((stationId) => lineKey.startsWith(`${stationId}::`)),
+    ),
+  };
 }
 
 function loadAMap(jsKey: string, securityCode: string) {
@@ -273,6 +327,11 @@ export function CommutePlanner() {
   const amapRef = useRef<AMapNamespace | null>(null);
   const overlaysRef = useRef<AMapOverlay[]>([]);
   const anchorMarkerRef = useRef<AMapMarker | null>(null);
+  const restoredSelectionRef = useRef<{
+    stationIds: string[];
+    lineKeys: string[];
+  } | null>(null);
+  const skipMemoryWriteRef = useRef(false);
   const [mapState, setMapState] = useState<'loading' | 'ready' | 'error'>(
     'loading',
   );
@@ -300,12 +359,18 @@ export function CommutePlanner() {
   const [departureDate, setDepartureDate] = useState(tomorrowAsInputValue);
   const [departureTime, setDepartureTime] = useState('08:30');
   const [memoryReady, setMemoryReady] = useState(false);
+  const [memoryClearNonce, setMemoryClearNonce] = useState(0);
   const [rememberLocally, setRememberLocally] = useState(true);
   const [recentPlaces, setRecentPlaces] = useState<PlaceTip[]>([]);
   const [memoryMessage, setMemoryMessage] = useState('');
   const [stationMemory, setStationMemory] = useState<{
     savedAt: number;
     stale: boolean;
+  } | null>(null);
+  const [commuteMemory, setCommuteMemory] = useState<{
+    savedAt: number;
+    stale: boolean;
+    fallback: boolean;
   } | null>(null);
 
   useEffect(() => {
@@ -320,6 +385,10 @@ export function CommutePlanner() {
         setDepartureTime(preferences.departureTime);
         setStationRadius(preferences.stationRadius);
         setRecentPlaces(memory.recentPlaces);
+        restoredSelectionRef.current = {
+          stationIds: preferences.selectedStationIds ?? [],
+          lineKeys: preferences.selectedLineKeys ?? [],
+        };
         if (preferences.selectedPlace) {
           setSelectedPlace(preferences.selectedPlace);
           setQuery(preferences.selectedPlace.name);
@@ -333,6 +402,10 @@ export function CommutePlanner() {
 
   useEffect(() => {
     if (!memoryReady || !rememberLocally) return;
+    if (skipMemoryWriteRef.current) {
+      skipMemoryWriteRef.current = false;
+      return;
+    }
     writePlannerMemory(
       {
         selectedPlace,
@@ -340,6 +413,8 @@ export function CommutePlanner() {
         departureDate,
         departureTime,
         stationRadius,
+        selectedStationIds,
+        selectedLineKeys,
       },
       recentPlaces,
     );
@@ -348,9 +423,12 @@ export function CommutePlanner() {
     departureDate,
     departureTime,
     memoryReady,
+    memoryClearNonce,
     recentPlaces,
     rememberLocally,
     selectedPlace,
+    selectedLineKeys,
+    selectedStationIds,
     stationRadius,
   ]);
 
@@ -494,9 +572,16 @@ export function CommutePlanner() {
     const key = stationMemoryKey(selectedPlace, stationRadius);
     void readStationCache<Station[]>(key).then((record) => {
       if (cancelled || !record) return;
+      const restored = restoredSelectionRef.current;
+      const choices = availableStationChoices(
+        record.data,
+        restored?.stationIds ?? [],
+        restored?.lineKeys ?? [],
+      );
+      restoredSelectionRef.current = null;
       setStations(record.data);
-      setSelectedStationIds(record.data[0] ? [record.data[0].id] : []);
-      setSelectedLineKeys([]);
+      setSelectedStationIds(choices.stationIds);
+      setSelectedLineKeys(choices.lineKeys);
       setStationState('ready');
       setStationMemory({
         savedAt: record.createdAt,
@@ -547,16 +632,17 @@ export function CommutePlanner() {
     [stations],
   );
 
-  function clearMapOverlays() {
+  const clearMapOverlays = useCallback(() => {
     overlaysRef.current.forEach((overlay) => overlay.setMap(null));
     overlaysRef.current = [];
-  }
+  }, []);
 
   function resetReachability() {
     setReachability(null);
     setReachabilityState('idle');
     setActiveRouteId(null);
     setReachabilityError('');
+    setCommuteMemory(null);
   }
 
   function resetNearbyStations() {
@@ -640,36 +726,39 @@ export function CommutePlanner() {
     map.setZoom(15);
   }
 
-  function drawNearbyStations(nearbyStations: Station[]) {
-    const AMap = amapRef.current;
-    const map = mapRef.current;
-    if (!AMap || !map) return;
-    clearMapOverlays();
-    const anchor = anchorMarkerRef.current;
-    if (anchor) {
-      anchor.setMap(map);
-      overlaysRef.current.push(anchor);
-    }
+  const drawNearbyStations = useCallback(
+    (nearbyStations: Station[]) => {
+      const AMap = amapRef.current;
+      const map = mapRef.current;
+      if (!AMap || !map) return;
+      clearMapOverlays();
+      const anchor = anchorMarkerRef.current;
+      if (anchor) {
+        anchor.setMap(map);
+        overlaysRef.current.push(anchor);
+      }
 
-    const markers = nearbyStations.map(
-      (station, index) =>
-        new AMap.Marker({
-          map,
-          position: parseLocation(station.location),
-          anchor: 'bottom-center',
-          title: station.name,
-          content: `<span class="station-map-pin ${station.mode === 'BUS' ? 'is-bus' : 'is-rail'}${index < 6 ? ' is-listed' : ''}"><b>${index < 6 ? index + 1 : station.mode === 'BUS' ? '公' : '轨'}</b></span>`,
-        }),
-    );
-    overlaysRef.current.push(...markers);
-    map.setFitView(overlaysRef.current, false, [90, 70, 90, 430]);
-  }
+      const markers = nearbyStations.map(
+        (station, index) =>
+          new AMap.Marker({
+            map,
+            position: parseLocation(station.location),
+            anchor: 'bottom-center',
+            title: station.name,
+            content: `<span class="station-map-pin ${station.mode === 'BUS' ? 'is-bus' : 'is-rail'}${index < 6 ? ' is-listed' : ''}"><b>${index < 6 ? index + 1 : station.mode === 'BUS' ? '公' : '轨'}</b></span>`,
+          }),
+      );
+      overlaysRef.current.push(...markers);
+      map.setFitView(overlaysRef.current, false, [90, 70, 90, 430]);
+    },
+    [clearMapOverlays],
+  );
 
   useEffect(() => {
     if (mapState === 'ready' && stationState === 'ready') {
       drawNearbyStations(stations);
     }
-  }, [mapState, stationState, stations]);
+  }, [drawNearbyStations, mapState, stationState, stations]);
 
   async function findStations() {
     const place = selectedPlace;
@@ -683,9 +772,14 @@ export function CommutePlanner() {
       : null;
 
     if (cached && cached.expiresAt > Date.now()) {
+      const choices = availableStationChoices(
+        cached.data,
+        selectedStationIds,
+        selectedLineKeys,
+      );
       setStations(cached.data);
-      setSelectedStationIds(cached.data[0] ? [cached.data[0].id] : []);
-      setSelectedLineKeys([]);
+      setSelectedStationIds(choices.stationIds);
+      setSelectedLineKeys(choices.lineKeys);
       setStationState('ready');
       setStationMemory({ savedAt: cached.createdAt, stale: false });
       drawNearbyStations(cached.data);
@@ -698,9 +792,14 @@ export function CommutePlanner() {
       );
       if (!response.ok) throw new Error('Station search failed');
       const data = (await response.json()) as { stations: Station[] };
+      const choices = availableStationChoices(
+        data.stations,
+        selectedStationIds,
+        selectedLineKeys,
+      );
       setStations(data.stations);
-      setSelectedStationIds(data.stations[0] ? [data.stations[0].id] : []);
-      setSelectedLineKeys([]);
+      setSelectedStationIds(choices.stationIds);
+      setSelectedLineKeys(choices.lineKeys);
       setStationState('ready');
       setStationMemory(
         rememberLocally ? { savedAt: Date.now(), stale: false } : null,
@@ -711,9 +810,14 @@ export function CommutePlanner() {
       }
     } catch {
       if (cached) {
+        const choices = availableStationChoices(
+          cached.data,
+          selectedStationIds,
+          selectedLineKeys,
+        );
         setStations(cached.data);
-        setSelectedStationIds(cached.data[0] ? [cached.data[0].id] : []);
-        setSelectedLineKeys([]);
+        setSelectedStationIds(choices.stationIds);
+        setSelectedLineKeys(choices.lineKeys);
         setStationState('ready');
         setStationMemory({ savedAt: cached.createdAt, stale: true });
         drawNearbyStations(cached.data);
@@ -723,161 +827,266 @@ export function CommutePlanner() {
     }
   }
 
-  function drawReachabilityMap(
-    data: ReachabilityResult,
-    activeStation: ReachableStation,
-  ) {
-    const AMap = amapRef.current;
-    const map = mapRef.current;
-    if (!AMap || !map) return;
+  const drawReachabilityMap = useCallback(
+    (data: ReachabilityResult, activeStation: ReachableStation) => {
+      const AMap = amapRef.current;
+      const map = mapRef.current;
+      if (!AMap || !map) return;
 
-    clearMapOverlays();
-    const focusOverlays: AMapOverlay[] = [];
-    const anchor = anchorMarkerRef.current;
-    if (anchor) {
-      anchor.setMap(map);
-      overlaysRef.current.push(anchor);
-      focusOverlays.push(anchor);
-    }
-
-    const routeSegments = routeVisuals(activeStation);
-    const routePolylines = routeSegments.map(
-      ({ segment, color }) =>
-        new AMap.Polyline({
-          map,
-          path: segment.path,
-          zIndex: segment.mode === 'WALK' ? 39 : 42,
-          isOutline: true,
-          outlineColor: '#ffffff',
-          borderWeight: 2,
-          strokeColor: color,
-          strokeOpacity: segment.mode === 'WALK' ? 0.82 : 1,
-          strokeWeight: segment.mode === 'WALK' ? 4 : 8,
-          strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
-          lineJoin: 'round',
-          lineCap: 'round',
-        }),
-    );
-    overlaysRef.current.push(...routePolylines);
-    focusOverlays.push(...routePolylines);
-
-    const routeStops = new Map<
-      string,
-      {
-        name: string;
-        location: [number, number];
-        roles: Set<RouteGeometrySegment['stops'][number]['role']>;
-        lines: Map<string, { label: string; color: string }>;
+      clearMapOverlays();
+      const focusOverlays: AMapOverlay[] = [];
+      const anchor = anchorMarkerRef.current;
+      if (anchor) {
+        anchor.setMap(map);
+        overlaysRef.current.push(anchor);
+        focusOverlays.push(anchor);
       }
-    >();
-    for (const visual of routeSegments) {
-      if (visual.segment.mode !== 'TRANSIT') continue;
-      for (const stop of visual.segment.stops) {
-        const key = stop.id || `${stop.name}:${stop.location.join(',')}`;
-        const current = routeStops.get(key) ?? {
-          name: stop.name,
-          location: stop.location,
-          roles: new Set(),
-          lines: new Map(),
-        };
-        current.roles.add(stop.role);
-        current.lines.set(visual.lineKey, {
-          label: visual.lineLabel,
-          color: visual.color,
-        });
-        routeStops.set(key, current);
-      }
-    }
-    const routeStopMarkers = [...routeStops.values()].map((stop) => {
-      const content = document.createElement('div');
-      content.className = `route-stop-marker${
-        stop.roles.has('BOARD') || stop.roles.has('ALIGHT')
-          ? ' is-transfer'
-          : ''
-      }`;
-      const dot = document.createElement('i');
-      const label = document.createElement('span');
-      label.textContent = stop.name;
-      const lines = document.createElement('small');
-      for (const line of stop.lines.values()) {
-        const badge = document.createElement('b');
-        badge.textContent = line.label;
-        badge.style.setProperty('--route-line-color', line.color);
-        lines.appendChild(badge);
-      }
-      content.appendChild(dot);
-      content.appendChild(label);
-      content.appendChild(lines);
-      return new AMap.Marker({
-        map,
-        position: stop.location,
-        anchor: 'bottom-center',
-        zIndex: 92,
-        title: `${stop.name} · ${[...stop.lines.values()]
-          .map((line) => line.label)
-          .join(' / ')}`,
-        content,
-      });
-    });
-    overlaysRef.current.push(...routeStopMarkers);
-    focusOverlays.push(...routeStopMarkers);
 
-    const startMarkers = stations
-      .filter((station) => selectedStationIds.includes(station.id))
-      .map(
-        (station) =>
-          new AMap.Marker({
+      const routeSegments = routeVisuals(activeStation);
+      const routePolylines = routeSegments.map(
+        ({ segment, color }) =>
+          new AMap.Polyline({
             map,
-            position: parseLocation(station.location),
-            anchor: 'center',
-            zIndex: 120,
-            title: `公司侧接驳站：${station.name}`,
-            content: '<span class="route-start-marker">司</span>',
+            path: segment.path,
+            zIndex: segment.mode === 'WALK' ? 39 : 42,
+            isOutline: true,
+            outlineColor: '#ffffff',
+            borderWeight: 2,
+            strokeColor: color,
+            strokeOpacity: segment.mode === 'WALK' ? 0.82 : 1,
+            strokeWeight: segment.mode === 'WALK' ? 4 : 8,
+            strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
+            lineJoin: 'round',
+            lineCap: 'round',
           }),
       );
-    overlaysRef.current.push(...startMarkers);
-    focusOverlays.push(...startMarkers);
+      overlaysRef.current.push(...routePolylines);
+      focusOverlays.push(...routePolylines);
 
-    const candidateMarkers = data.directions.to.stations.map((station) => {
-      const isActive = station.logicalId === activeStation.logicalId;
-      const isFarthest =
-        station.logicalId === data.directions.to.farthest?.logicalId;
-      const content = document.createElement('span');
-      content.className = `reachable-map-marker ${
-        station.mode === 'BUS' ? 'is-bus' : 'is-rail'
-      }${isFarthest ? ' is-farthest' : ''}${
-        isActive ? ' is-active' : ' is-muted'
-      }`;
-      const minutes = document.createElement('em');
-      minutes.textContent = `${station.durationMinutes}分`;
-      content.appendChild(minutes);
-      const marker = new AMap.Marker({
-        map,
-        position: parseLocation(station.location),
-        anchor: 'center',
-        zIndex: isActive ? 135 : 80,
-        title: `${station.name} · ${station.durationMinutes} 分钟`,
-        content,
+      const routeStops = new Map<
+        string,
+        {
+          name: string;
+          location: [number, number];
+          roles: Set<RouteGeometrySegment['stops'][number]['role']>;
+          lines: Map<string, { label: string; color: string }>;
+        }
+      >();
+      for (const visual of routeSegments) {
+        if (visual.segment.mode !== 'TRANSIT') continue;
+        for (const stop of visual.segment.stops) {
+          const key = stop.id || `${stop.name}:${stop.location.join(',')}`;
+          const current = routeStops.get(key) ?? {
+            name: stop.name,
+            location: stop.location,
+            roles: new Set(),
+            lines: new Map(),
+          };
+          current.roles.add(stop.role);
+          current.lines.set(visual.lineKey, {
+            label: visual.lineLabel,
+            color: visual.color,
+          });
+          routeStops.set(key, current);
+        }
+      }
+      const routeStopMarkers = [...routeStops.values()].map((stop) => {
+        const content = document.createElement('div');
+        content.className = `route-stop-marker${
+          stop.roles.has('BOARD') || stop.roles.has('ALIGHT')
+            ? ' is-transfer'
+            : ''
+        }`;
+        const dot = document.createElement('i');
+        const label = document.createElement('span');
+        label.textContent = stop.name;
+        const lines = document.createElement('small');
+        for (const line of stop.lines.values()) {
+          const badge = document.createElement('b');
+          badge.textContent = line.label;
+          badge.style.setProperty('--route-line-color', line.color);
+          lines.appendChild(badge);
+        }
+        content.appendChild(dot);
+        content.appendChild(label);
+        content.appendChild(lines);
+        return new AMap.Marker({
+          map,
+          position: stop.location,
+          anchor: 'bottom-center',
+          zIndex: 92,
+          title: `${stop.name} · ${[...stop.lines.values()]
+            .map((line) => line.label)
+            .join(' / ')}`,
+          content,
+        });
       });
-      if (isActive) focusOverlays.push(marker);
-      return marker;
+      overlaysRef.current.push(...routeStopMarkers);
+      focusOverlays.push(...routeStopMarkers);
+
+      const startMarkers = stations
+        .filter((station) => selectedStationIds.includes(station.id))
+        .map(
+          (station) =>
+            new AMap.Marker({
+              map,
+              position: parseLocation(station.location),
+              anchor: 'center',
+              zIndex: 120,
+              title: `公司侧接驳站：${station.name}`,
+              content: '<span class="route-start-marker">司</span>',
+            }),
+        );
+      overlaysRef.current.push(...startMarkers);
+      focusOverlays.push(...startMarkers);
+
+      const candidateMarkers = data.directions.to.stations.map((station) => {
+        const isActive = station.logicalId === activeStation.logicalId;
+        const isFarthest =
+          station.logicalId === data.directions.to.farthest?.logicalId;
+        const content = document.createElement('span');
+        content.className = `reachable-map-marker ${
+          station.mode === 'BUS' ? 'is-bus' : 'is-rail'
+        }${isFarthest ? ' is-farthest' : ''}${
+          isActive ? ' is-active' : ' is-muted'
+        }`;
+        const minutes = document.createElement('em');
+        minutes.textContent = `${station.durationMinutes}分`;
+        content.appendChild(minutes);
+        const marker = new AMap.Marker({
+          map,
+          position: parseLocation(station.location),
+          anchor: 'center',
+          zIndex: isActive ? 135 : 80,
+          title: `${station.name} · ${station.durationMinutes} 分钟`,
+          content,
+        });
+        if (isActive) focusOverlays.push(marker);
+        return marker;
+      });
+      overlaysRef.current.push(...candidateMarkers);
+      map.setFitView(focusOverlays, false, [90, 70, 90, 430]);
+    },
+    [clearMapOverlays, selectedStationIds, stations],
+  );
+
+  const applyReachabilityResult = useCallback(
+    (
+      data: ReachabilityResult,
+      preferredRouteId: string | null,
+      memory: { savedAt: number; stale: boolean; fallback: boolean } | null,
+    ) => {
+      setReachability(data);
+      setReachabilityState('ready');
+      setReachabilityError('');
+      setCommuteMemory(memory);
+      const initialStation =
+        data.directions.to.stations.find(
+          (station) => station.logicalId === preferredRouteId,
+        ) ??
+        data.directions.to.farthest ??
+        data.directions.to.stations[0];
+      if (initialStation) {
+        setActiveRouteId(initialStation.logicalId);
+        drawReachabilityMap(data, initialStation);
+      }
+    },
+    [drawReachabilityMap],
+  );
+
+  useEffect(() => {
+    if (
+      !memoryReady ||
+      !rememberLocally ||
+      !selectedPlace ||
+      selectedStationIds.length === 0 ||
+      stationState !== 'ready' ||
+      reachabilityState !== 'idle'
+    ) {
+      return;
+    }
+    let cancelled = false;
+    const key = commuteMemoryKey(
+      selectedPlace,
+      budget,
+      departureDate,
+      departureTime,
+      selectedStationIds,
+      selectedLineKeys,
+    );
+    void readCommuteCache<RememberedCommuteResult>(key).then((record) => {
+      if (cancelled || !record) return;
+      applyReachabilityResult(record.data.result, record.data.activeRouteId, {
+        savedAt: record.createdAt,
+        stale: record.expiresAt <= Date.now(),
+        fallback: false,
+      });
     });
-    overlaysRef.current.push(...candidateMarkers);
-    map.setFitView(focusOverlays, false, [90, 70, 90, 430]);
-  }
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    budget,
+    applyReachabilityResult,
+    departureDate,
+    departureTime,
+    memoryReady,
+    reachabilityState,
+    rememberLocally,
+    selectedLineKeys,
+    selectedPlace,
+    selectedStationIds,
+    stationState,
+  ]);
 
   function activateRoute(station: ReachableStation) {
     if (!reachability || station.routeGeometry.length === 0) return;
     setActiveRouteId(station.logicalId);
     drawReachabilityMap(reachability, station);
+    if (rememberLocally && selectedPlace) {
+      const key = commuteMemoryKey(
+        selectedPlace,
+        budget,
+        departureDate,
+        departureTime,
+        selectedStationIds,
+        selectedLineKeys,
+      );
+      void updateCommuteCache<RememberedCommuteResult>(key, (remembered) => ({
+        ...remembered,
+        activeRouteId: station.logicalId,
+      }));
+    }
   }
 
-  async function calculateReachability() {
-    if (!selectedPlace || selectedStationIds.length === 0) return;
+  async function calculateReachability(forceRefresh = false) {
+    const place = selectedPlace;
+    if (!place || selectedStationIds.length === 0) return;
     setReachabilityState('loading');
     setReachability(null);
     setActiveRouteId(null);
     setReachabilityError('');
+    setCommuteMemory(null);
+    const cacheKey = commuteMemoryKey(
+      place,
+      budget,
+      departureDate,
+      departureTime,
+      selectedStationIds,
+      selectedLineKeys,
+    );
+    const cached = rememberLocally
+      ? await readCommuteCache<RememberedCommuteResult>(cacheKey)
+      : null;
+
+    if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
+      applyReachabilityResult(cached.data.result, cached.data.activeRouteId, {
+        savedAt: cached.createdAt,
+        stale: false,
+        fallback: false,
+      });
+      return;
+    }
 
     try {
       const response = await fetch('/api/amap/reachability', {
@@ -885,9 +1094,9 @@ export function CommutePlanner() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           anchor: {
-            id: selectedPlace.id,
-            name: selectedPlace.name,
-            location: selectedPlace.location,
+            id: place.id,
+            name: place.name,
+            location: place.location,
           },
           budgetMinutes: budget,
           departureDate,
@@ -918,15 +1127,29 @@ export function CommutePlanner() {
         );
       }
       const data = payload;
-      setReachability(data);
-      setReachabilityState('ready');
       const initialStation =
         data.directions.to.farthest ?? data.directions.to.stations[0];
-      if (initialStation) {
-        setActiveRouteId(initialStation.logicalId);
-        drawReachabilityMap(data, initialStation);
+      const savedAt = Date.now();
+      applyReachabilityResult(
+        data,
+        initialStation?.logicalId ?? null,
+        rememberLocally ? { savedAt, stale: false, fallback: false } : null,
+      );
+      if (rememberLocally) {
+        void writeCommuteCache(cacheKey, {
+          result: data,
+          activeRouteId: initialStation?.logicalId ?? null,
+        } satisfies RememberedCommuteResult);
       }
     } catch (error) {
+      if (cached) {
+        applyReachabilityResult(cached.data.result, cached.data.activeRouteId, {
+          savedAt: cached.createdAt,
+          stale: true,
+          fallback: true,
+        });
+        return;
+      }
       setReachabilityError(
         error instanceof Error ? error.message : '通勤圈计算失败。',
       );
@@ -1080,7 +1303,7 @@ export function CommutePlanner() {
               <Database aria-hidden="true" />
               <span>
                 <strong>仅在这台设备记住</strong>
-                <small>最多保留 5 个工作地点，不保存地图密钥</small>
+                <small>5 个地点 · 6 组站点 · 4 次通勤结果，不保存密钥</small>
               </span>
               <Switch
                 checked={rememberLocally}
@@ -1092,6 +1315,7 @@ export function CommutePlanner() {
                     void clearAllLocalMemory();
                     setRecentPlaces([]);
                     setStationMemory(null);
+                    setCommuteMemory(null);
                     setMemoryMessage('本机记忆已关闭并清除');
                   } else {
                     setMemoryMessage('本机记忆已开启');
@@ -1104,9 +1328,12 @@ export function CommutePlanner() {
               type="button"
               disabled={!rememberLocally}
               onClick={() => {
+                skipMemoryWriteRef.current = true;
+                setMemoryClearNonce((value) => value + 1);
                 void clearAllLocalMemory();
                 setRecentPlaces([]);
                 setStationMemory(null);
+                setCommuteMemory(null);
                 setMemoryMessage('已清除本机保存的地点和条件');
               }}
             >
@@ -1382,7 +1609,7 @@ export function CommutePlanner() {
                   reachabilityState === 'loading' ||
                   selectedStationIds.length === 0
                 }
-                onClick={calculateReachability}
+                onClick={() => void calculateReachability()}
               >
                 <Radar />
                 {reachabilityState === 'loading'
@@ -1425,6 +1652,28 @@ export function CommutePlanner() {
                 </div>
                 <Radar aria-hidden="true" />
               </div>
+
+              {commuteMemory && (
+                <div
+                  className={`memory-source-note commute-memory-note${commuteMemory.stale ? ' is-stale' : ''}`}
+                >
+                  <Database aria-hidden="true" />
+                  <span>
+                    {commuteMemory.fallback
+                      ? '接口失败，已显示上次成功结果'
+                      : commuteMemory.stale
+                        ? '上次保存的通勤结果'
+                        : '本机通勤结果'}{' '}
+                    · {memoryAgeLabel(commuteMemory.savedAt)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void calculateReachability(true)}
+                  >
+                    <RefreshCw aria-hidden="true" /> 更新
+                  </button>
+                </div>
+              )}
 
               <div className="scan-metrics">
                 <span>
