@@ -653,6 +653,29 @@ input {
   color: #53615b;
   font-size: 11px;
 }
+.memory-source-note {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 9px;
+  border-radius: 9px;
+  background: #eaf4ef;
+  padding: 7px 9px;
+  color: #3c695b;
+  font-size: 10px;
+}
+.memory-source-note.is-stale {
+  background: #fff3e5;
+  color: #91602d;
+}
+.memory-source-note svg {
+  width: 12px;
+  height: 12px;
+}
+.memory-source-note strong {
+  margin-left: auto;
+  font-size: 9px;
+}
 .station-summary svg {
   width: 13px;
   height: 13px;

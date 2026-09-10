@@ -13,6 +13,7 @@ import {
   LocateFixed,
   MapPin,
   Radar,
+  RefreshCw,
   Search,
   Sparkles,
   TrainFront,
@@ -25,11 +26,13 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import {
   addRecentPlace,
-  clearPlannerMemory,
+  clearAllLocalMemory,
   isLocalMemoryEnabled,
   readPlannerMemory,
+  readStationCache,
   setLocalMemoryEnabled,
   writePlannerMemory,
+  writeStationCache,
 } from '@/lib/local-memory';
 
 type PlaceTip = {
@@ -217,6 +220,22 @@ function tomorrowAsInputValue() {
   return date.toISOString().slice(0, 10);
 }
 
+function stationMemoryKey(place: PlaceTip, radius: number) {
+  return `stations:v2:${place.location}:${radius}`;
+}
+
+function memoryAgeLabel(savedAt: number) {
+  const elapsedMinutes = Math.max(
+    0,
+    Math.floor((Date.now() - savedAt) / 60_000),
+  );
+  if (elapsedMinutes < 1) return '刚刚';
+  if (elapsedMinutes < 60) return `${elapsedMinutes} 分钟前`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours} 小时前`;
+  return `${Math.floor(elapsedHours / 24)} 天前`;
+}
+
 function loadAMap(jsKey: string, securityCode: string) {
   if (window.AMap) return Promise.resolve(window.AMap);
 
@@ -284,6 +303,10 @@ export function CommutePlanner() {
   const [rememberLocally, setRememberLocally] = useState(true);
   const [recentPlaces, setRecentPlaces] = useState<PlaceTip[]>([]);
   const [memoryMessage, setMemoryMessage] = useState('');
+  const [stationMemory, setStationMemory] = useState<{
+    savedAt: number;
+    stale: boolean;
+  } | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -466,6 +489,26 @@ export function CommutePlanner() {
   }, [mapState, selectedPlace]);
 
   useEffect(() => {
+    if (!memoryReady || !rememberLocally || !selectedPlace) return;
+    let cancelled = false;
+    const key = stationMemoryKey(selectedPlace, stationRadius);
+    void readStationCache<Station[]>(key).then((record) => {
+      if (cancelled || !record) return;
+      setStations(record.data);
+      setSelectedStationIds(record.data[0] ? [record.data[0].id] : []);
+      setSelectedLineKeys([]);
+      setStationState('ready');
+      setStationMemory({
+        savedAt: record.createdAt,
+        stale: record.expiresAt <= Date.now(),
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [memoryReady, rememberLocally, selectedPlace, stationRadius]);
+
+  useEffect(() => {
     const trimmed = query.trim();
     if (trimmed.length < 2 || selectedPlace?.name === trimmed) {
       return;
@@ -522,6 +565,7 @@ export function CommutePlanner() {
     setStationState('idle');
     setSelectedStationIds([]);
     setSelectedLineKeys([]);
+    setStationMemory(null);
     resetReachability();
 
     const map = mapRef.current;
@@ -571,6 +615,7 @@ export function CommutePlanner() {
     setSelectedStationIds([]);
     setSelectedLineKeys([]);
     setStationState('idle');
+    setStationMemory(null);
     resetReachability();
     clearMapOverlays();
 
@@ -595,15 +640,61 @@ export function CommutePlanner() {
     map.setZoom(15);
   }
 
+  function drawNearbyStations(nearbyStations: Station[]) {
+    const AMap = amapRef.current;
+    const map = mapRef.current;
+    if (!AMap || !map) return;
+    clearMapOverlays();
+    const anchor = anchorMarkerRef.current;
+    if (anchor) {
+      anchor.setMap(map);
+      overlaysRef.current.push(anchor);
+    }
+
+    const markers = nearbyStations.map(
+      (station, index) =>
+        new AMap.Marker({
+          map,
+          position: parseLocation(station.location),
+          anchor: 'bottom-center',
+          title: station.name,
+          content: `<span class="station-map-pin ${station.mode === 'BUS' ? 'is-bus' : 'is-rail'}${index < 6 ? ' is-listed' : ''}"><b>${index < 6 ? index + 1 : station.mode === 'BUS' ? '公' : '轨'}</b></span>`,
+        }),
+    );
+    overlaysRef.current.push(...markers);
+    map.setFitView(overlaysRef.current, false, [90, 70, 90, 430]);
+  }
+
+  useEffect(() => {
+    if (mapState === 'ready' && stationState === 'ready') {
+      drawNearbyStations(stations);
+    }
+  }, [mapState, stationState, stations]);
+
   async function findStations() {
-    if (!selectedPlace) return;
+    const place = selectedPlace;
+    if (!place) return;
     setStationState('loading');
     resetReachability();
     setShowAllStations(false);
+    const cacheKey = stationMemoryKey(place, stationRadius);
+    const cached = rememberLocally
+      ? await readStationCache<Station[]>(cacheKey)
+      : null;
+
+    if (cached && cached.expiresAt > Date.now()) {
+      setStations(cached.data);
+      setSelectedStationIds(cached.data[0] ? [cached.data[0].id] : []);
+      setSelectedLineKeys([]);
+      setStationState('ready');
+      setStationMemory({ savedAt: cached.createdAt, stale: false });
+      drawNearbyStations(cached.data);
+      return;
+    }
 
     try {
       const response = await fetch(
-        `/api/amap/stations?location=${encodeURIComponent(selectedPlace.location)}&radius=${stationRadius}`,
+        `/api/amap/stations?location=${encodeURIComponent(place.location)}&radius=${stationRadius}`,
       );
       if (!response.ok) throw new Error('Station search failed');
       const data = (await response.json()) as { stations: Station[] };
@@ -611,31 +702,24 @@ export function CommutePlanner() {
       setSelectedStationIds(data.stations[0] ? [data.stations[0].id] : []);
       setSelectedLineKeys([]);
       setStationState('ready');
-
-      const AMap = amapRef.current;
-      const map = mapRef.current;
-      if (!AMap || !map) return;
-      clearMapOverlays();
-      const anchor = anchorMarkerRef.current;
-      if (anchor) {
-        anchor.setMap(map);
-        overlaysRef.current.push(anchor);
-      }
-
-      const markers = data.stations.map(
-        (station, index) =>
-          new AMap.Marker({
-            map,
-            position: parseLocation(station.location),
-            anchor: 'bottom-center',
-            title: station.name,
-            content: `<span class="station-map-pin ${station.mode === 'BUS' ? 'is-bus' : 'is-rail'}${index < 6 ? ' is-listed' : ''}"><b>${index < 6 ? index + 1 : station.mode === 'BUS' ? '公' : '轨'}</b></span>`,
-          }),
+      setStationMemory(
+        rememberLocally ? { savedAt: Date.now(), stale: false } : null,
       );
-      overlaysRef.current.push(...markers);
-      map.setFitView(overlaysRef.current, false, [90, 70, 90, 430]);
+      drawNearbyStations(data.stations);
+      if (rememberLocally) {
+        void writeStationCache(cacheKey, data.stations);
+      }
     } catch {
-      setStationState('error');
+      if (cached) {
+        setStations(cached.data);
+        setSelectedStationIds(cached.data[0] ? [cached.data[0].id] : []);
+        setSelectedLineKeys([]);
+        setStationState('ready');
+        setStationMemory({ savedAt: cached.createdAt, stale: true });
+        drawNearbyStations(cached.data);
+      } else {
+        setStationState('error');
+      }
     }
   }
 
@@ -920,6 +1004,7 @@ export function CommutePlanner() {
                     setSelectedStationIds([]);
                     setSelectedLineKeys([]);
                     setShowAllStations(false);
+                    setStationMemory(null);
                     resetReachability();
                     clearMapOverlays();
                     anchorMarkerRef.current = null;
@@ -1004,8 +1089,9 @@ export function CommutePlanner() {
                   setRememberLocally(checked);
                   setLocalMemoryEnabled(checked);
                   if (!checked) {
-                    clearPlannerMemory();
+                    void clearAllLocalMemory();
                     setRecentPlaces([]);
+                    setStationMemory(null);
                     setMemoryMessage('本机记忆已关闭并清除');
                   } else {
                     setMemoryMessage('本机记忆已开启');
@@ -1018,8 +1104,9 @@ export function CommutePlanner() {
               type="button"
               disabled={!rememberLocally}
               onClick={() => {
-                clearPlannerMemory();
+                void clearAllLocalMemory();
                 setRecentPlaces([]);
+                setStationMemory(null);
                 setMemoryMessage('已清除本机保存的地点和条件');
               }}
             >
@@ -1134,6 +1221,10 @@ export function CommutePlanner() {
           >
             {stationState === 'loading' ? (
               '正在查找站点…'
+            ) : stationState === 'ready' ? (
+              <>
+                <RefreshCw /> 刷新附近站点
+              </>
             ) : (
               <>
                 <LocateFixed /> 查找附近公共交通
@@ -1174,6 +1265,18 @@ export function CommutePlanner() {
                   公交 {groupedStations.bus.length}
                 </span>
               </div>
+              {stationMemory && (
+                <div
+                  className={`memory-source-note${stationMemory.stale ? ' is-stale' : ''}`}
+                >
+                  <Database aria-hidden="true" />
+                  <span>
+                    {stationMemory.stale ? '备用的本机记录' : '本机站点记录'} ·{' '}
+                    {memoryAgeLabel(stationMemory.savedAt)}
+                  </span>
+                  {stationMemory.stale && <strong>建议刷新</strong>}
+                </div>
+              )}
               <div className="station-selection-summary">
                 <strong>已选 {selectedStationIds.length} / 3 个接驳站点</strong>
                 <small>选中线路会限定路线；不选线路表示允许该站全部线路</small>
