@@ -10,7 +10,6 @@ type ReachabilityRequest = {
     location?: string;
   };
   budgetMinutes?: number;
-  direction?: CommuteDirection;
   departureDate?: string;
   departureTime?: string;
   accessStations?: Array<{
@@ -123,6 +122,18 @@ type AccessStationBudget = {
   usable: boolean;
 };
 
+type DirectionReachability = {
+  direction: CommuteDirection;
+  routeCheckCount: number;
+  checkedCount: number;
+  failedCount: number;
+  reachableCount: number;
+  fastestCandidateMinutes: number | null;
+  farthest: ReachableStation | null;
+  nearMisses: ReachableStation[];
+  stations: ReachableStation[];
+};
+
 type ReachabilityResult = {
   sampled: true;
   budgetMinutes: number;
@@ -131,13 +142,10 @@ type ReachabilityResult = {
   routeCheckCount: number;
   selectedAccessStationCount: number;
   accessStationBudgets: AccessStationBudget[];
-  checkedCount: number;
-  failedCount: number;
-  reachableCount: number;
-  fastestCandidateMinutes: number | null;
-  farthest: ReachableStation | null;
-  nearMisses: ReachableStation[];
-  stations: ReachableStation[];
+  directions: {
+    to: DirectionReachability;
+    from: DirectionReachability;
+  };
 };
 
 type CacheEntry = { expiresAt: number; value: ReachabilityResult };
@@ -292,8 +300,7 @@ async function findStationsAround(location: string, radius: number) {
 }
 
 function selectSectorCandidates(stations: CandidateStation[]) {
-  const rail = stations.filter((station) => station.mode !== 'BUS');
-  return (rail[0] ?? stations[0]) ? [rail[0] ?? stations[0]] : [];
+  return stations[0] ? [stations[0]] : [];
 }
 
 async function runThrottled<T, R>(
@@ -449,6 +456,93 @@ async function planTransit(
   }
 }
 
+async function evaluateDirection(
+  candidates: CandidateStation[],
+  activeAccessStations: AccessStationWithWalk[],
+  direction: CommuteDirection,
+  departureDate: string,
+  departureTime: string,
+  anchorLocation: string,
+): Promise<DirectionReachability> {
+  const routePairs = candidates.flatMap((station) =>
+    activeAccessStations.map((accessStation) => ({ station, accessStation })),
+  );
+  const plannedPairs = await runThrottled(
+    routePairs,
+    450,
+    async ({ station, accessStation }) => ({
+      station,
+      route: await planTransit(
+        station,
+        accessStation,
+        direction,
+        departureDate,
+        departureTime,
+      ),
+    }),
+  );
+  const validPairs = plannedPairs.filter(
+    (item): item is typeof item & { route: NonNullable<typeof item.route> } =>
+      Boolean(item.route),
+  );
+  const bestByStation = new Map<string, (typeof validPairs)[number]>();
+  for (const item of validPairs) {
+    const existing = bestByStation.get(item.station.logicalId);
+    if (
+      !existing ||
+      item.route.durationSeconds < existing.route.durationSeconds
+    ) {
+      bestByStation.set(item.station.logicalId, item);
+    }
+  }
+  const successful = [...bestByStation.values()];
+  const evaluated = successful.map<ReachableStation>(({ station, route }) => ({
+    ...station,
+    transitDurationSeconds: route.transitDurationSeconds,
+    transitDurationMinutes: Math.ceil(route.transitDurationSeconds / 60),
+    durationSeconds: route.durationSeconds,
+    durationMinutes: Math.ceil(route.durationSeconds / 60),
+    straightLineMeters: straightLineDistance(anchorLocation, station.location),
+    segmentCount: route.segmentCount,
+    routeLines: route.routeLines,
+    matchedLines: route.matchedLines,
+    accessStation: route.accessStation,
+  }));
+  const reachable = evaluated
+    .filter(
+      (station) =>
+        station.transitDurationSeconds <=
+        station.accessStation.remainingTransitSeconds,
+    )
+    .sort((left, right) => right.straightLineMeters - left.straightLineMeters);
+  const nearMisses = evaluated
+    .filter(
+      (station) =>
+        station.transitDurationSeconds >
+        station.accessStation.remainingTransitSeconds,
+    )
+    .sort((left, right) => left.durationSeconds - right.durationSeconds)
+    .slice(0, 3);
+
+  return {
+    direction,
+    routeCheckCount: routePairs.length,
+    checkedCount: successful.length,
+    failedCount: candidates.length - successful.length,
+    reachableCount: reachable.length,
+    fastestCandidateMinutes:
+      successful.length > 0
+        ? Math.ceil(
+            Math.min(...successful.map((item) => item.route.durationSeconds)) /
+              60,
+          )
+        : null,
+    farthest: reachable[0] ?? null,
+    nearMisses,
+    stations: reachable.slice(0, 12),
+  };
+}
+
 export async function POST(request: Request) {
   let body: ReachabilityRequest;
   try {
@@ -462,7 +556,6 @@ export async function POST(request: Request) {
 
   const anchor = body.anchor;
   const budgetMinutes = Number(body.budgetMinutes);
-  const direction = body.direction;
   const departureDate = body.departureDate ?? '';
   const departureTime = body.departureTime ?? '';
   const requestedAccessStations = body.accessStations ?? [];
@@ -475,7 +568,6 @@ export async function POST(request: Request) {
     !Number.isInteger(budgetMinutes) ||
     budgetMinutes < 20 ||
     budgetMinutes > 90 ||
-    (direction !== 'to' && direction !== 'from') ||
     !datePattern.test(departureDate) ||
     !timePattern.test(departureTime) ||
     requestedAccessStations.length < 1 ||
@@ -538,7 +630,6 @@ export async function POST(request: Request) {
     anchor.id,
     anchor.location,
     budgetMinutes,
-    direction,
     departureDate,
     departureTime,
     ...accessStations
@@ -625,74 +716,28 @@ export async function POST(request: Request) {
     );
     const candidates = selectEvenly([...candidateMap.values()], candidateLimit);
 
-    const routePairs = candidates.flatMap((station) =>
-      activeAccessStations.map((accessStation) => ({ station, accessStation })),
+    const to = await evaluateDirection(
+      candidates,
+      activeAccessStations,
+      'to',
+      departureDate,
+      departureTime,
+      validatedAnchor.location,
     );
-    const plannedPairs = await runThrottled(
-      routePairs,
-      450,
-      async ({ station, accessStation }) => ({
-        station,
-        route: await planTransit(
-          station,
-          accessStation,
-          direction,
-          departureDate,
-          departureTime,
-        ),
-      }),
+    const from = await evaluateDirection(
+      candidates,
+      activeAccessStations,
+      'from',
+      departureDate,
+      departureTime,
+      validatedAnchor.location,
     );
-    const validPairs = plannedPairs.filter(
-      (item): item is typeof item & { route: NonNullable<typeof item.route> } =>
-        Boolean(item.route),
-    );
-    const bestByStation = new Map<string, (typeof validPairs)[number]>();
-    for (const item of validPairs) {
-      const existing = bestByStation.get(item.station.logicalId);
-      if (
-        !existing ||
-        item.route.durationSeconds < existing.route.durationSeconds
-      ) {
-        bestByStation.set(item.station.logicalId, item);
-      }
-    }
-    const successful = [...bestByStation.values()];
-    const evaluated = successful.map<ReachableStation>(
-      ({ station, route }) => ({
-        ...station,
-        transitDurationSeconds: route.transitDurationSeconds,
-        transitDurationMinutes: Math.ceil(route.transitDurationSeconds / 60),
-        durationSeconds: route.durationSeconds,
-        durationMinutes: Math.ceil(route.durationSeconds / 60),
-        straightLineMeters: straightLineDistance(
-          validatedAnchor.location,
-          station.location,
-        ),
-        segmentCount: route.segmentCount,
-        routeLines: route.routeLines,
-        matchedLines: route.matchedLines,
-        accessStation: route.accessStation,
-      }),
-    );
-    const reachable = evaluated
-      .filter(
-        (station) =>
-          station.transitDurationSeconds <=
-          station.accessStation.remainingTransitSeconds,
-      )
-      .sort(
-        (left, right) => right.straightLineMeters - left.straightLineMeters,
-      );
-    const nearMisses = evaluated
-      .filter((station) => station.durationSeconds > budgetMinutes * 60)
-      .sort((left, right) => left.durationSeconds - right.durationSeconds)
-      .slice(0, 3);
     const result: ReachabilityResult = {
       sampled: true,
       budgetMinutes,
       scanRadiusMeters,
       candidateCount: candidates.length,
-      routeCheckCount: routePairs.length,
+      routeCheckCount: to.routeCheckCount + from.routeCheckCount,
       selectedAccessStationCount: accessStations.length,
       accessStationBudgets: plannedAccessStations.map((station) => ({
         id: station.id,
@@ -704,20 +749,7 @@ export async function POST(request: Request) {
         ),
         usable: station.remainingTransitSeconds > 0,
       })),
-      checkedCount: successful.length,
-      failedCount: candidates.length - successful.length,
-      reachableCount: reachable.length,
-      fastestCandidateMinutes:
-        successful.length > 0
-          ? Math.ceil(
-              Math.min(
-                ...successful.map((item) => item.route.durationSeconds),
-              ) / 60,
-            )
-          : null,
-      farthest: reachable[0] ?? null,
-      nearMisses,
-      stations: reachable.slice(0, 12),
+      directions: { to, from },
     };
 
     cache.set(cacheKey, { expiresAt: Date.now() + 5 * 60_000, value: result });

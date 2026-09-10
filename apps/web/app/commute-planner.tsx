@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowRight,
+  ArrowLeftRight,
   Building2,
   BusFront,
   CalendarDays,
@@ -63,6 +63,18 @@ type ReachableStation = Station & {
   };
 };
 
+type DirectionReachability = {
+  direction: 'to' | 'from';
+  routeCheckCount: number;
+  checkedCount: number;
+  failedCount: number;
+  reachableCount: number;
+  fastestCandidateMinutes: number | null;
+  farthest: ReachableStation | null;
+  nearMisses: ReachableStation[];
+  stations: ReachableStation[];
+};
+
 type ReachabilityResult = {
   sampled: true;
   budgetMinutes: number;
@@ -78,13 +90,10 @@ type ReachabilityResult = {
     remainingTransitMinutes: number;
     usable: boolean;
   }>;
-  checkedCount: number;
-  failedCount: number;
-  reachableCount: number;
-  fastestCandidateMinutes: number | null;
-  farthest: ReachableStation | null;
-  nearMisses: ReachableStation[];
-  stations: ReachableStation[];
+  directions: {
+    to: DirectionReachability;
+    from: DirectionReachability;
+  };
   cached?: boolean;
 };
 
@@ -204,7 +213,6 @@ export function CommutePlanner() {
     null,
   );
   const [budget, setBudget] = useState(45);
-  const [direction, setDirection] = useState<'to' | 'from'>('to');
   const [departureDate, setDepartureDate] = useState(tomorrowAsInputValue);
   const [departureTime, setDepartureTime] = useState('08:30');
 
@@ -218,21 +226,19 @@ export function CommutePlanner() {
         {
           name: 'configure_commute_search',
           title: '设置通勤查询',
-          description:
-            '填写可见的工作地点关键词、通勤方向、时间预算和出发时间。',
+          description: '填写可见的工作地点关键词、双向通勤时间预算和出发时间。',
           inputSchema: {
             type: 'object',
             properties: {
               query: { type: 'string', minLength: 2, maxLength: 80 },
               budgetMinutes: { type: 'integer', minimum: 20, maximum: 90 },
-              direction: { type: 'string', enum: ['to_work', 'from_work'] },
               departureDate: { type: 'string', format: 'date' },
               departureTime: {
                 type: 'string',
                 pattern: '^([01]\\d|2[0-3]):[0-5]\\d$',
               },
             },
-            required: ['query', 'budgetMinutes', 'direction'],
+            required: ['query', 'budgetMinutes'],
             additionalProperties: false,
           },
           annotations: { readOnlyHint: false, untrustedContentHint: false },
@@ -241,14 +247,12 @@ export function CommutePlanner() {
             const nextQuery =
               typeof value.query === 'string' ? value.query.trim() : '';
             const nextBudget = Number(value.budgetMinutes);
-            const nextDirection = value.direction;
             if (
               nextQuery.length < 2 ||
               nextQuery.length > 80 ||
               !Number.isInteger(nextBudget) ||
               nextBudget < 20 ||
-              nextBudget > 90 ||
-              (nextDirection !== 'to_work' && nextDirection !== 'from_work')
+              nextBudget > 90
             ) {
               throw new Error('通勤查询参数无效。');
             }
@@ -266,7 +270,6 @@ export function CommutePlanner() {
             anchorMarkerRef.current = null;
             setQuery(nextQuery);
             setBudget(nextBudget);
-            setDirection(nextDirection === 'to_work' ? 'to' : 'from');
             if (typeof value.departureDate === 'string')
               setDepartureDate(value.departureDate);
             if (typeof value.departureTime === 'string')
@@ -275,7 +278,7 @@ export function CommutePlanner() {
             return {
               query: nextQuery,
               budgetMinutes: nextBudget,
-              direction: nextDirection,
+              directions: ['to_work', 'from_work'],
               status: 'configured',
             };
           },
@@ -504,7 +507,6 @@ export function CommutePlanner() {
             location: selectedPlace.location,
           },
           budgetMinutes: budget,
-          direction,
           departureDate,
           departureTime,
           accessStations: stations
@@ -536,15 +538,49 @@ export function CommutePlanner() {
         overlaysRef.current.push(anchor);
       }
 
-      const markers = data.stations.map((station) => {
-        const isFarthest = station.id === data.farthest?.id;
-        const modeClass = station.mode === 'BUS' ? 'is-bus' : 'is-rail';
+      const markerStations = new Map<
+        string,
+        {
+          station: ReachableStation;
+          toMinutes?: number;
+          fromMinutes?: number;
+          isFarthest: boolean;
+        }
+      >();
+      for (const [directionKey, result] of Object.entries(data.directions) as [
+        'to' | 'from',
+        DirectionReachability,
+      ][]) {
+        for (const station of result.stations) {
+          const existing = markerStations.get(station.logicalId);
+          markerStations.set(station.logicalId, {
+            station,
+            toMinutes:
+              directionKey === 'to'
+                ? station.durationMinutes
+                : existing?.toMinutes,
+            fromMinutes:
+              directionKey === 'from'
+                ? station.durationMinutes
+                : existing?.fromMinutes,
+            isFarthest:
+              existing?.isFarthest === true ||
+              station.logicalId === result.farthest?.logicalId,
+          });
+        }
+      }
+      const markers = [...markerStations.values()].map((item) => {
+        const modeClass = item.station.mode === 'BUS' ? 'is-bus' : 'is-rail';
+        const labels = [
+          item.toMinutes ? `去${item.toMinutes}` : '',
+          item.fromMinutes ? `回${item.fromMinutes}` : '',
+        ].filter(Boolean);
         return new AMap.Marker({
           map,
-          position: parseLocation(station.location),
+          position: parseLocation(item.station.location),
           anchor: 'center',
-          title: `${station.name} · ${station.durationMinutes} 分钟`,
-          content: `<span class="reachable-map-marker ${modeClass}${isFarthest ? ' is-farthest' : ''}"><em>${station.durationMinutes}</em></span>`,
+          title: `${item.station.name} · ${labels.join(' / ')} 分钟`,
+          content: `<span class="reachable-map-marker ${modeClass}${item.isFarthest ? ' is-farthest' : ''}"><em>${labels.join('·')}</em></span>`,
         });
       });
       overlaysRef.current.push(...markers);
@@ -682,27 +718,12 @@ export function CommutePlanner() {
               <span>90 分钟</span>
             </div>
 
-            <div className="direction-switch" aria-label="通勤方向">
-              <button
-                type="button"
-                className={direction === 'to' ? 'active' : ''}
-                onClick={() => {
-                  setDirection('to');
-                  resetReachability();
-                }}
-              >
-                住处 <ArrowRight /> 公司
-              </button>
-              <button
-                type="button"
-                className={direction === 'from' ? 'active' : ''}
-                onClick={() => {
-                  setDirection('from');
-                  resetReachability();
-                }}
-              >
-                公司 <ArrowRight /> 住处
-              </button>
+            <div className="bidirectional-note">
+              <ArrowLeftRight aria-hidden="true" />
+              <span>
+                <strong>同时核验双向通勤</strong>
+                <small>住处 → 公司与公司 → 住处使用同一日期、时刻</small>
+              </span>
             </div>
 
             <div className="date-time-grid">
@@ -930,16 +951,17 @@ export function CommutePlanner() {
                   ? '正在规划候选路线…'
                   : selectedStationIds.length === 0
                     ? '请先选择接驳站点'
-                    : `按 ${selectedStationIds.length} 个站点计算 ${budget} 分钟通勤圈`}
+                    : `按 ${selectedStationIds.length} 个站点计算双向 ${budget} 分钟通勤圈`}
               </Button>
 
               {reachabilityState === 'loading' && (
                 <output className="scan-progress">
                   <span className="search-spinner" />
                   <div>
-                    <strong>正在扫描 8 个方向</strong>
+                    <strong>正在扫描 8 个方向并核验双向路线</strong>
                     <small>
-                      按选定站点和线路核验候选路线，通常需要 10～40 秒。
+                      先计算步行时间，再按剩余预算核验公交路线，通常需要 15～60
+                      秒。
                     </small>
                   </div>
                 </output>
@@ -960,57 +982,12 @@ export function CommutePlanner() {
                 <div>
                   <span className="step-kicker">04 · 通勤圈结果</span>
                   <strong>
-                    {reachability.reachableCount > 0
-                      ? `找到 ${reachability.reachableCount} 个可达站点`
-                      : '当前样本中没有可达站点'}
+                    去公司 {reachability.directions.to.reachableCount} 个 ·
+                    回住处 {reachability.directions.from.reachableCount} 个
                   </strong>
                 </div>
                 <Radar aria-hidden="true" />
               </div>
-
-              {reachability.farthest && (
-                <div className="farthest-card">
-                  <span className="farthest-icon">
-                    <Trophy />
-                  </span>
-                  <div>
-                    <small>本轮最远可达</small>
-                    <strong>{reachability.farthest.name}</strong>
-                    <span>
-                      {reachability.farthest.durationMinutes} 分钟 · 直线
-                      {(
-                        reachability.farthest.straightLineMeters / 1000
-                      ).toFixed(1)}{' '}
-                      公里
-                    </span>
-                    <span className="route-access-note">
-                      经 {reachability.farthest.accessStation.name} · 步行{' '}
-                      {reachability.farthest.accessStation.walkingMinutes} 分钟
-                      + 公交 {reachability.farthest.transitDurationMinutes} 分钟
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {!reachability.farthest && reachability.nearMisses[0] && (
-                <div className="farthest-card is-near-miss">
-                  <span className="farthest-icon">
-                    <Clock3 />
-                  </span>
-                  <div>
-                    <small>最接近预算的候选</small>
-                    <strong>{reachability.nearMisses[0].name}</strong>
-                    <span>
-                      需要 {reachability.nearMisses[0].durationMinutes} 分钟，
-                      超出当前预算
-                      {reachability.nearMisses[0].durationMinutes - budget} 分钟
-                    </span>
-                    <span className="route-access-note">
-                      经 {reachability.nearMisses[0].accessStation.name}
-                    </span>
-                  </div>
-                </div>
-              )}
 
               <div className="scan-metrics">
                 <span>
@@ -1041,39 +1018,118 @@ export function CommutePlanner() {
                 ))}
               </div>
 
-              <div className="reachability-list">
-                {reachability.stations.slice(0, 6).map((station, index) => (
-                  <button
-                    type="button"
-                    key={station.id}
-                    onClick={() => {
-                      mapRef.current?.setCenter(
-                        parseLocation(station.location),
-                      );
-                      mapRef.current?.setZoom(16);
-                    }}
-                  >
-                    <span className="result-rank">{index + 1}</span>
-                    <span>
-                      <strong>{station.name}</strong>
-                      <small>
-                        直线 {(station.straightLineMeters / 1000).toFixed(1)}{' '}
-                        公里
-                      </small>
-                      <small>
-                        经 {station.accessStation.name} · 步行{' '}
-                        {station.accessStation.walkingMinutes} 分钟 + 公交{' '}
-                        {station.transitDurationMinutes} 分钟
-                      </small>
-                    </span>
-                    <span className="duration-chip">
-                      {station.durationMinutes} 分钟
-                    </span>
-                  </button>
+              <div className="direction-results">
+                {(
+                  [
+                    {
+                      key: 'to',
+                      title: '住处 → 公司',
+                      result: reachability.directions.to,
+                    },
+                    {
+                      key: 'from',
+                      title: '公司 → 住处',
+                      result: reachability.directions.from,
+                    },
+                  ] as const
+                ).map(({ key, title, result }) => (
+                  <section className="direction-result" key={key}>
+                    <div className="direction-result-heading">
+                      <strong>{title}</strong>
+                      <span>{result.reachableCount} 个可达样本</span>
+                    </div>
+
+                    {result.farthest ? (
+                      <div className="farthest-card">
+                        <span className="farthest-icon">
+                          <Trophy />
+                        </span>
+                        <div>
+                          <small>本方向最远可达</small>
+                          <strong>{result.farthest.name}</strong>
+                          <span>
+                            总计 {result.farthest.durationMinutes} 分钟 · 直线{' '}
+                            {(
+                              result.farthest.straightLineMeters / 1000
+                            ).toFixed(1)}{' '}
+                            公里
+                          </span>
+                          <span className="route-access-note">
+                            经 {result.farthest.accessStation.name} · 步行{' '}
+                            {result.farthest.accessStation.walkingMinutes} 分钟
+                            + 公交 {result.farthest.transitDurationMinutes} 分钟
+                          </span>
+                        </div>
+                      </div>
+                    ) : result.nearMisses[0] ? (
+                      <div className="farthest-card is-near-miss">
+                        <span className="farthest-icon">
+                          <Clock3 />
+                        </span>
+                        <div>
+                          <small>最接近预算的候选</small>
+                          <strong>{result.nearMisses[0].name}</strong>
+                          <span>
+                            需要 {result.nearMisses[0].durationMinutes} 分钟，
+                            超出预算{' '}
+                            {Math.max(
+                              1,
+                              result.nearMisses[0].durationMinutes - budget,
+                            )}{' '}
+                            分钟
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="direction-empty">本方向暂无有效候选路线</p>
+                    )}
+
+                    <div className="reachability-list">
+                      {result.stations.slice(0, 4).map((station, index) => (
+                        <button
+                          type="button"
+                          key={station.id}
+                          onClick={() => {
+                            mapRef.current?.setCenter(
+                              parseLocation(station.location),
+                            );
+                            mapRef.current?.setZoom(16);
+                          }}
+                        >
+                          <span className="result-rank">{index + 1}</span>
+                          <span>
+                            <strong>{station.name}</strong>
+                            <small>
+                              {station.mode === 'BUS'
+                                ? '公交站'
+                                : station.mode === 'LIGHT_RAIL'
+                                  ? '有轨电车 / 轻轨'
+                                  : '地铁站'}{' '}
+                              · 直线{' '}
+                              {(station.straightLineMeters / 1000).toFixed(1)}{' '}
+                              公里
+                            </small>
+                            <small>
+                              步行 {station.accessStation.walkingMinutes} + 公交{' '}
+                              {station.transitDurationMinutes} 分钟
+                            </small>
+                            {station.routeLines.length > 0 && (
+                              <small>
+                                {station.routeLines.slice(0, 2).join(' / ')}
+                              </small>
+                            )}
+                          </span>
+                          <span className="duration-chip">
+                            {station.durationMinutes} 分钟
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
                 ))}
               </div>
               <p className="sampling-note">
-                接驳步行来自高德步行路径规划；公共交通只使用扣除步行后的剩余预算。当前仍为方向抽样，不代表完整等时圈。
+                双向分别调用公共交通规划；公交、地铁和有轨电车均可成为候选。当前仍为方向抽样，不代表完整等时圈。
               </p>
             </div>
           )}
@@ -1127,9 +1183,7 @@ export function CommutePlanner() {
             <strong>
               {budget} 分钟 · 工作日 {departureTime}
             </strong>
-            <span>
-              {direction === 'to' ? '住处前往工作地点' : '从工作地点返回住处'}
-            </span>
+            <span>住处 ⇄ 工作地点，双向同时核验</span>
           </div>
         </div>
       </section>
