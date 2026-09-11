@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -10,6 +10,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryDirectory = path.resolve(scriptDirectory, "..");
 const webDirectory = path.join(repositoryDirectory, "apps", "web");
 const environmentPath = path.join(repositoryDirectory, ".env.local");
+const logPath = path.join(repositoryDirectory, "local-setup.log");
 const csrfToken = randomBytes(24).toString("hex");
 const skipBrowserOpen =
   process.argv.includes("--no-open") || process.env.COMMUTE_SETUP_NO_OPEN === "1";
@@ -22,11 +23,17 @@ let environmentConfigured = await hasCompleteEnvironment();
 let devProcess = null;
 let startupTimer = null;
 let setupOrigin = "";
+let lastCommandOutput = "";
 let setupStatus = {
   phase: "ready",
   message: environmentConfigured ? "检测到已有高德配置，可以直接启动。" : "请填写高德配置。",
   appUrl: null,
+  details: null,
 };
+
+try {
+  writeFileSync(logPath, `[${new Date().toISOString()}] 通勤圈本地初始化助手启动\n`, "utf8");
+} catch {}
 
 function parseEnvironment(contents) {
   const values = new Map();
@@ -123,8 +130,18 @@ function runNpm(arguments_, onOutput) {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
-  child.stdout.on("data", (chunk) => onOutput?.(chunk.toString()));
-  child.stderr.on("data", (chunk) => onOutput?.(chunk.toString()));
+  const handleOutput = (chunk) => {
+    const output = chunk.toString();
+    process.stdout.write(output);
+    const cleanOutput = output.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
+    lastCommandOutput = `${lastCommandOutput}${cleanOutput}`.slice(-6000);
+    try {
+      appendFileSync(logPath, cleanOutput, "utf8");
+    } catch {}
+    onOutput?.(cleanOutput);
+  };
+  child.stdout.on("data", handleOutput);
+  child.stderr.on("data", handleOutput);
   return child;
 }
 
@@ -144,9 +161,15 @@ async function startApplication() {
       phase: "error",
       message: `当前 Node.js ${nodeVersion} 版本过低，请升级到 22.13 或更高版本。`,
       appUrl: null,
+      details: null,
     };
     return;
   }
+
+  lastCommandOutput = "";
+  try {
+    appendFileSync(logPath, `\n[${new Date().toISOString()}] 开始启动\n`, "utf8");
+  } catch {}
 
   try {
     const vinextBinary = path.join(
@@ -160,59 +183,119 @@ async function startApplication() {
         phase: "installing",
         message: "正在安装项目依赖，第一次可能需要几分钟…",
         appUrl: null,
+        details: null,
       };
       await waitForCommand(runNpm(["install"]));
     }
-
-    setupStatus = {
-      phase: "starting",
-      message: "配置已保存，正在启动通勤圈…",
-      appUrl: null,
-    };
-
-    devProcess = runNpm(["run", "dev"], (output) => {
-      const match = output.match(/http:\/\/(?:localhost|127\.0\.0\.1):\d+\/?/);
-      if (!match || setupStatus.phase === "running") return;
-      if (startupTimer) clearTimeout(startupTimer);
-      setupStatus = {
-        phase: "running",
-        message: "通勤圈已成功启动。",
-        appUrl: match[0],
-      };
-    });
-
-    devProcess.once("error", (error) => {
-      if (startupTimer) clearTimeout(startupTimer);
-      setupStatus = {
-        phase: "error",
-        message: `启动失败：${error.message}`,
-        appUrl: null,
-      };
-    });
-    devProcess.once("exit", (code) => {
-      if (startupTimer) clearTimeout(startupTimer);
-      devProcess = null;
-      setupStatus = {
-        phase: "error",
-        message: `应用已停止，退出码 ${code ?? "未知"}。`,
-        appUrl: null,
-      };
-    });
-
-    startupTimer = setTimeout(() => {
-      if (setupStatus.phase === "starting") {
-        setupStatus = {
-          phase: "error",
-          message: "启动等待超时，请查看初始化窗口中的错误信息。",
-          appUrl: null,
-        };
-      }
-    }, 90_000);
+    launchDevelopmentServer(false);
   } catch (error) {
     setupStatus = {
       phase: "error",
       message: `初始化失败：${error instanceof Error ? error.message : "未知错误"}`,
       appUrl: null,
+      details: lastCommandOutput || null,
+    };
+  }
+}
+
+function launchDevelopmentServer(repairAttempted) {
+  setupStatus = {
+    phase: "starting",
+    message: repairAttempted ? "依赖修复完成，正在重新启动通勤圈…" : "配置已保存，正在启动通勤圈…",
+    appUrl: null,
+    details: null,
+  };
+
+  let reachedRunningState = false;
+  let existingServerDetected = false;
+  let detectedAppUrl = null;
+  let launchOutput = "";
+  const launchedProcess = runNpm(["run", "dev"], (output) => {
+    launchOutput = `${launchOutput}${output}`.slice(-6000);
+    existingServerDetected = /Another vinext dev server is already running/i.test(launchOutput);
+    const match = launchOutput.match(/http:\/\/(?:localhost|127\.0\.0\.1):\d+\/?/);
+    if (!match || reachedRunningState) return;
+    reachedRunningState = true;
+    detectedAppUrl = match[0];
+    if (startupTimer) clearTimeout(startupTimer);
+    setupStatus = {
+      phase: "running",
+      message: existingServerDetected
+        ? "检测到通勤圈已经在运行，可以直接打开。"
+        : "通勤圈已成功启动。",
+      appUrl: detectedAppUrl,
+      details: null,
+    };
+  });
+  devProcess = launchedProcess;
+
+  launchedProcess.once("error", (error) => {
+    if (startupTimer) clearTimeout(startupTimer);
+    if (devProcess === launchedProcess) devProcess = null;
+    setupStatus = {
+      phase: "error",
+      message: `无法启动本地服务：${error.message}`,
+      appUrl: null,
+      details: lastCommandOutput || null,
+    };
+  });
+  launchedProcess.once("exit", (code) => {
+    if (startupTimer) clearTimeout(startupTimer);
+    if (devProcess === launchedProcess) devProcess = null;
+
+    if (existingServerDetected && reachedRunningState && detectedAppUrl) {
+      setupStatus = {
+        phase: "running",
+        message: "检测到通勤圈已经在运行，可以直接打开。",
+        appUrl: detectedAppUrl,
+        details: null,
+      };
+      return;
+    }
+
+    if (!reachedRunningState && code !== 0 && !repairAttempted) {
+      setupStatus = {
+        phase: "installing",
+        message: "首次启动失败，正在自动修复依赖并重试…",
+        appUrl: null,
+        details: null,
+      };
+      void repairDependenciesAndRetry();
+      return;
+    }
+
+    setupStatus = {
+      phase: "error",
+      message: reachedRunningState
+        ? `应用已停止，退出码 ${code ?? "未知"}。`
+        : `自动修复后仍无法启动，退出码 ${code ?? "未知"}。`,
+      appUrl: null,
+      details: lastCommandOutput || "没有捕获到启动日志。",
+    };
+  });
+
+  startupTimer = setTimeout(() => {
+    if (setupStatus.phase === "starting") {
+      setupStatus = {
+        phase: "error",
+        message: "启动等待超时，请展开错误详情。",
+        appUrl: null,
+        details: lastCommandOutput || "没有捕获到启动日志。",
+      };
+    }
+  }, 90_000);
+}
+
+async function repairDependenciesAndRetry() {
+  try {
+    await waitForCommand(runNpm(["install"]));
+    launchDevelopmentServer(true);
+  } catch (error) {
+    setupStatus = {
+      phase: "error",
+      message: `依赖修复失败：${error instanceof Error ? error.message : "未知错误"}`,
+      appUrl: null,
+      details: lastCommandOutput || "没有捕获到安装日志。",
     };
   }
 }
@@ -293,6 +376,11 @@ function renderPage() {
     .status.is-running { background: #e4f2eb; color: #1c684f; }
     .app-link { display: none; margin-top: 10px; color: #1c684f; font-weight: 800; }
     .app-link.is-visible { display: inline-flex; }
+    .diagnostics { margin-top: 14px; border: 1px solid #ead4cf; border-radius: 11px; background: #fff8f6; padding: 10px 12px; }
+    .diagnostics[hidden] { display: none; }
+    .diagnostics summary { color: #943d30; }
+    .diagnostics pre { max-height: 220px; overflow: auto; margin: 10px 0; border-radius: 8px; background: #1e2925; padding: 12px; color: #dce9e3; font: 12px/1.55 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+    .copy-log { border: 1px solid #d9bdb7; border-radius: 8px; background: #fff; padding: 7px 10px; color: #84382d; cursor: pointer; font-size: 12px; font-weight: 700; }
     aside h2 { margin: 10px 0 22px; font-size: 24px; }
     aside ol { display: grid; gap: 17px; margin: 0; padding-left: 20px; color: rgba(255,255,255,.76); font-size: 14px; line-height: 1.6; }
     .privacy { margin-top: auto; border-radius: 14px; background: rgba(255,255,255,.08); padding: 16px; color: rgba(255,255,255,.7); font-size: 12px; line-height: 1.65; }
@@ -333,6 +421,7 @@ function renderPage() {
         </form>
         <div id="status" class="status" role="status" aria-live="polite">${setupStatus.message}</div>
         <a id="app-link" class="app-link" href="#">打开通勤圈 →</a>
+        <details id="diagnostics-panel" class="diagnostics" hidden open><summary>启动错误详情</summary><pre id="diagnostics-text"></pre><button id="copy-log" class="copy-log" type="button">复制错误信息</button></details>
         <details><summary>还没有高德 Key？</summary><p>请先在高德开放平台创建 JS API Key 和 Web 服务 API Key。浏览器 Key 与服务端 Key 用途不同，不建议混用。</p></details>
       </main>
       <aside>
@@ -353,6 +442,9 @@ function renderPage() {
     const reuseButton = document.querySelector('#reuse-button');
     const statusBox = document.querySelector('#status');
     const appLink = document.querySelector('#app-link');
+    const diagnosticsPanel = document.querySelector('#diagnostics-panel');
+    const diagnosticsText = document.querySelector('#diagnostics-text');
+    const copyLogButton = document.querySelector('#copy-log');
     const buttons = [...document.querySelectorAll('button')];
 
     function setBusy(busy) { buttons.forEach((button) => { button.disabled = busy; }); }
@@ -364,6 +456,8 @@ function renderPage() {
         appLink.classList.add('is-visible');
         setBusy(false);
       }
+      diagnosticsPanel.hidden = !status.details;
+      diagnosticsText.textContent = status.details || '';
       if (status.phase === 'error') setBusy(false);
     }
     async function begin(payload) {
@@ -389,6 +483,10 @@ function renderPage() {
       begin(data);
     });
     reuseButton.addEventListener('click', () => begin({ reuseExisting: true }));
+    copyLogButton.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(diagnosticsText.textContent || '');
+      copyLogButton.textContent = '已复制';
+    });
     setInterval(async () => {
       try {
         const response = await fetch('/api/status', { cache: 'no-store' });
@@ -442,6 +540,7 @@ const server = http.createServer(async (request, response) => {
         phase: "starting",
         message: "正在准备本地环境…",
         appUrl: null,
+        details: null,
       };
       sendJson(response, 202, setupStatus);
       void startApplication();
