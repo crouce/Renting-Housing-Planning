@@ -11,7 +11,8 @@ const repositoryDirectory = path.resolve(scriptDirectory, "..");
 const webDirectory = path.join(repositoryDirectory, "apps", "web");
 const environmentPath = path.join(repositoryDirectory, ".env.local");
 const csrfToken = randomBytes(24).toString("hex");
-const skipBrowserOpen = process.argv.includes("--no-open");
+const skipBrowserOpen =
+  process.argv.includes("--no-open") || process.env.COMMUTE_SETUP_NO_OPEN === "1";
 
 const nodeVersion = process.versions.node;
 const [nodeMajor, nodeMinor] = nodeVersion.split(".").map(Number);
