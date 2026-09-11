@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowRight,
   Building2,
   BusFront,
   CalendarDays,
   ChevronRight,
   CircleAlert,
+  CircleCheck,
   Clock3,
   Database,
   History,
@@ -15,6 +17,7 @@ import {
   Radar,
   RefreshCw,
   Search,
+  Settings2,
   Sparkles,
   TrainFront,
   Trophy,
@@ -365,6 +368,7 @@ export function CommutePlanner() {
   const [departureDate, setDepartureDate] = useState(tomorrowAsInputValue);
   const [departureTime, setDepartureTime] = useState('08:30');
   const [memoryReady, setMemoryReady] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(true);
   const [memoryClearNonce, setMemoryClearNonce] = useState(0);
   const [rememberLocally, setRememberLocally] = useState(true);
   const [recentPlaces, setRecentPlaces] = useState<PlaceTip[]>([]);
@@ -399,6 +403,7 @@ export function CommutePlanner() {
           setSelectedPlace(preferences.selectedPlace);
           setQuery(preferences.selectedPlace.name);
           setMemoryMessage('已恢复上次的工作地点和通勤条件');
+          setShowOnboarding(false);
         }
       }
       setMemoryReady(true);
@@ -696,6 +701,35 @@ export function CommutePlanner() {
         : [...current, key],
     );
     resetReachability();
+  }
+
+  function handleQueryChange(nextValue: string) {
+    setQuery(nextValue);
+    if (nextValue.trim().length < 2) setTips([]);
+    if (selectedPlace?.name === nextValue) return;
+    setSelectedPlace(null);
+    setStations([]);
+    setSelectedStationIds([]);
+    setSelectedLineKeys([]);
+    setShowAllStations(false);
+    setStationMemory(null);
+    resetReachability();
+    clearMapOverlays();
+    anchorMarkerRef.current = null;
+  }
+
+  function setMemoryPreference(checked: boolean) {
+    setRememberLocally(checked);
+    setLocalMemoryEnabled(checked);
+    if (!checked) {
+      void clearAllLocalMemory();
+      setRecentPlaces([]);
+      setStationMemory(null);
+      setCommuteMemory(null);
+      setMemoryMessage('本机记忆已关闭并清除');
+    } else {
+      setMemoryMessage('本机记忆已开启');
+    }
   }
 
   function selectPlace(place: PlaceTip) {
@@ -1253,17 +1287,231 @@ export function CommutePlanner() {
             <p className="brand-caption">租房通勤助手</p>
           </div>
         </div>
-        <div className="header-status">
-          <span className={`status-light ${mapState}`} />
-          {mapState === 'ready'
-            ? '高德地图已连接'
-            : mapState === 'error'
-              ? '地图加载失败'
-              : '正在连接地图'}
+        <div className="header-actions">
+          {!showOnboarding && (
+            <button
+              type="button"
+              className="header-setup-action"
+              onClick={() => setShowOnboarding(true)}
+            >
+              <Settings2 aria-hidden="true" /> 重新设置
+            </button>
+          )}
+          <div className="header-status">
+            <span className={`status-light ${mapState}`} />
+            {mapState === 'ready'
+              ? '高德地图已连接'
+              : mapState === 'error'
+                ? '地图加载失败'
+                : '正在连接地图'}
+          </div>
         </div>
       </header>
 
-      <section className="workspace">
+      {showOnboarding && (
+        <section className="onboarding-page" aria-labelledby="onboarding-title">
+          {!memoryReady ? (
+            <div className="onboarding-loading" role="status">
+              <span className="map-pulse" />
+              <strong>正在读取本机设置</strong>
+              <small>马上就好…</small>
+            </div>
+          ) : (
+            <div className="onboarding-layout">
+              <div className="onboarding-form-card">
+                <div className="onboarding-heading">
+                  <span className="step-kicker">开始规划</span>
+                  <h1 id="onboarding-title">先设置每天要去的地方</h1>
+                  <p>完成基础条件后进入地图，再选择附近站点和具体线路。</p>
+                </div>
+
+                <ol className="onboarding-steps" aria-label="初始化步骤">
+                  <li className={selectedPlace ? 'is-complete' : 'is-active'}>
+                    <span>{selectedPlace ? <CircleCheck /> : '1'}</span>
+                    工作地点
+                  </li>
+                  <li className={selectedPlace ? 'is-active' : undefined}>
+                    <span>2</span>
+                    通勤偏好
+                  </li>
+                  <li>
+                    <span>3</span>
+                    进入地图
+                  </li>
+                </ol>
+
+                <div className="onboarding-search-block">
+                  <label htmlFor="onboarding-place-search">工作地点</label>
+                  <div className="search-input-wrap">
+                    <Search aria-hidden="true" />
+                    <Input
+                      id="onboarding-place-search"
+                      value={query}
+                      onChange={(event) =>
+                        handleQueryChange(event.target.value)
+                      }
+                      placeholder="搜索公司、园区或学校"
+                      autoComplete="off"
+                      autoFocus={!selectedPlace}
+                    />
+                    {searching && (
+                      <span className="search-spinner" aria-label="搜索中" />
+                    )}
+                  </div>
+                  {tips.length > 0 && (
+                    <div className="suggestion-list" aria-label="地点建议">
+                      {tips.map((tip) => (
+                        <button
+                          type="button"
+                          key={tip.id}
+                          onClick={() => selectPlace(tip)}
+                        >
+                          <MapPin aria-hidden="true" />
+                          <span>
+                            <strong>{tip.name}</strong>
+                            <small>
+                              {[tip.district, tip.address]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </small>
+                          </span>
+                          <ChevronRight aria-hidden="true" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {recentPlaces.length > 0 && !tips.length && (
+                    <div className="onboarding-recent-list">
+                      <span>最近使用</span>
+                      <div>
+                        {recentPlaces.map((place) => (
+                          <button
+                            type="button"
+                            key={`${place.id}:${place.location}`}
+                            onClick={() => selectPlace(place)}
+                          >
+                            <History aria-hidden="true" /> {place.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {selectedPlace && (
+                    <div className="onboarding-selected-place">
+                      <CircleCheck aria-hidden="true" />
+                      <span>
+                        <strong>{selectedPlace.name}</strong>
+                        <small>{selectedAddress || '地址信息暂缺'}</small>
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="onboarding-preferences">
+                  <fieldset>
+                    <legend>最长通勤时间</legend>
+                    <div className="onboarding-budget-options">
+                      {[30, 45, 60].map((minutes) => (
+                        <button
+                          type="button"
+                          key={minutes}
+                          className={budget === minutes ? 'is-selected' : ''}
+                          aria-pressed={budget === minutes}
+                          onClick={() => {
+                            setBudget(minutes);
+                            resetReachability();
+                          }}
+                        >
+                          {minutes} 分钟
+                        </button>
+                      ))}
+                    </div>
+                  </fieldset>
+                  <label htmlFor="onboarding-departure-time">
+                    <span>通常出发时间</span>
+                    <Input
+                      id="onboarding-departure-time"
+                      type="time"
+                      value={departureTime}
+                      onChange={(event) => {
+                        setDepartureTime(event.target.value);
+                        resetReachability();
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <div className="onboarding-memory-row">
+                  <Database aria-hidden="true" />
+                  <span>
+                    <strong>在这台设备记住设置</strong>
+                    <small>下次直接恢复，不保存地图密钥</small>
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    className="memory-toggle"
+                    aria-checked={rememberLocally}
+                    aria-label="在本机记住初始化设置"
+                    onClick={() => setMemoryPreference(!rememberLocally)}
+                  >
+                    <span />
+                  </button>
+                </div>
+
+                <div className="onboarding-actions">
+                  <Button
+                    size="lg"
+                    disabled={!selectedPlace}
+                    onClick={() => setShowOnboarding(false)}
+                  >
+                    进入通勤规划 <ArrowRight aria-hidden="true" />
+                  </Button>
+                  <button
+                    type="button"
+                    onClick={() => setShowOnboarding(false)}
+                  >
+                    暂时跳过，先查看地图
+                  </button>
+                </div>
+              </div>
+
+              <aside className="onboarding-summary" aria-label="当前设置摘要">
+                <span className="step-kicker">当前计划</span>
+                <h2>{selectedPlace?.name ?? '等待选择工作地点'}</h2>
+                <dl>
+                  <div>
+                    <dt>通勤预算</dt>
+                    <dd>{budget} 分钟</dd>
+                  </div>
+                  <div>
+                    <dt>出发时间</dt>
+                    <dd>{departureTime}</dd>
+                  </div>
+                  <div>
+                    <dt>本机记忆</dt>
+                    <dd>{rememberLocally ? '已开启' : '未开启'}</dd>
+                  </div>
+                </dl>
+                <div className="onboarding-next-steps">
+                  <strong>进入地图后</strong>
+                  <ol>
+                    <li>查询 500 米、1 公里或 1.5 公里内的站点</li>
+                    <li>选择最多 3 个接驳站和允许乘坐的线路</li>
+                    <li>比较各接驳站分别可达的住所侧路线</li>
+                  </ol>
+                </div>
+              </aside>
+            </div>
+          )}
+        </section>
+      )}
+
+      <section
+        className={`workspace${showOnboarding ? ' is-obscured' : ''}`}
+        aria-hidden={showOnboarding}
+        inert={showOnboarding ? true : undefined}
+      >
         <aside className="control-panel" aria-label="通勤条件">
           <div className="panel-heading">
             <span className="step-kicker">01 · 确定工作地点</span>
@@ -1278,21 +1526,7 @@ export function CommutePlanner() {
               <Input
                 id="place-search"
                 value={query}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  if (event.target.value.trim().length < 2) setTips([]);
-                  if (selectedPlace?.name !== event.target.value) {
-                    setSelectedPlace(null);
-                    setStations([]);
-                    setSelectedStationIds([]);
-                    setSelectedLineKeys([]);
-                    setShowAllStations(false);
-                    setStationMemory(null);
-                    resetReachability();
-                    clearMapOverlays();
-                    anchorMarkerRef.current = null;
-                  }
-                }}
+                onChange={(event) => handleQueryChange(event.target.value)}
                 placeholder="搜索公司、园区或学校"
                 autoComplete="off"
               />
@@ -1371,20 +1605,7 @@ export function CommutePlanner() {
                 className="memory-toggle"
                 aria-checked={rememberLocally}
                 aria-label="在本机记住工作地点和通勤条件"
-                onClick={() => {
-                  const checked = !rememberLocally;
-                  setRememberLocally(checked);
-                  setLocalMemoryEnabled(checked);
-                  if (!checked) {
-                    void clearAllLocalMemory();
-                    setRecentPlaces([]);
-                    setStationMemory(null);
-                    setCommuteMemory(null);
-                    setMemoryMessage('本机记忆已关闭并清除');
-                  } else {
-                    setMemoryMessage('本机记忆已开启');
-                  }
-                }}
+                onClick={() => setMemoryPreference(!rememberLocally)}
               >
                 <span />
               </button>
