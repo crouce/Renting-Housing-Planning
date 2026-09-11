@@ -45,6 +45,9 @@ renting-assistance-service/
 ├─ tests/
 │  ├─ integration/                  # 跨模块与真实适配器测试
 │  └─ fixtures/maps/                # 脱敏后的供应商响应样例
+├─ scripts/
+│  └─ local-setup.mjs               # 本地浏览器初始化与自动启动助手
+├─ start-local.cmd                  # Windows 双击启动入口
 ├─ ROADMAP.md
 ├─ README.md
 ├─ package.json                     # workspace 命令，初始化时创建

@@ -35,7 +35,15 @@
 
 ## 本地运行
 
-高德配置保存在项目根目录的 `.env.local`。启动当前 Web 应用：
+推荐使用本地初始化助手。Windows 用户双击仓库根目录的 `start-local.cmd`；macOS 或 Linux 用户运行：
+
+```bash
+node scripts/local-setup.mjs
+```
+
+助手会在浏览器中检查 Node.js 版本、填写或复用高德配置、自动安装依赖并启动应用。高德密钥只写入项目根目录的 `.env.local`，不会发送到线上或提交到 Git。
+
+也可以手动启动当前 Web 应用：
 
 ```powershell
 cd apps/web
