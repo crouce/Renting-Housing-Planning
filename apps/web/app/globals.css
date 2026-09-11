@@ -1049,6 +1049,62 @@ input {
   color: #75817d;
   font-size: 11px;
 }
+.access-route-groups {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+.access-route-group {
+  overflow: hidden;
+  border: 1px solid #dce5e1;
+  border-radius: 12px;
+  background: #fafcfb;
+}
+.access-route-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid #e5ebe8;
+  background: #f1f6f3;
+  padding: 8px 10px;
+}
+.access-route-group-heading strong {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: #24483e;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.access-route-group-heading strong span {
+  display: grid;
+  width: 25px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 7px;
+  background: #173f34;
+  color: #fff;
+  font-size: 9px;
+}
+.access-route-group-heading small {
+  flex: 0 0 auto;
+  color: #74817c;
+  font-size: 9px;
+}
+.access-route-group .reachability-list {
+  margin-top: 0;
+}
+.access-route-group .reachability-list button {
+  padding-inline: 9px;
+}
+.access-route-group .direction-empty {
+  margin: 8px;
+}
 .reachability-list {
   margin-top: 10px;
 }
@@ -1236,6 +1292,13 @@ input {
   width: 18px;
   height: 3px;
   border-radius: 999px;
+}
+.map-legend i.legend-overview-route {
+  width: 18px;
+  height: 3px;
+  border-radius: 999px;
+  background: #4f7f72;
+  opacity: 0.38;
 }
 .map-context-card {
   top: 20px;

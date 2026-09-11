@@ -104,6 +104,13 @@ type DirectionReachability = {
   farthest: ReachableStation | null;
   nearMisses: ReachableStation[];
   stations: ReachableStation[];
+  accessRoutes: Array<{
+    accessStationId: string;
+    accessStationName: string;
+    reachableCount: number;
+    farthestRouteId: string | null;
+    routeIds: string[];
+  }>;
 };
 
 type ReachabilityResult = {
@@ -240,7 +247,7 @@ function commuteMemoryKey(
   selectedLineKeys: string[],
 ) {
   return [
-    'commute:v4',
+    'commute:v5',
     place.location,
     budget,
     departureDate,
@@ -842,23 +849,61 @@ export function CommutePlanner() {
       }
 
       const routeSegments = routeVisuals(activeStation);
-      const routePolylines = routeSegments.map(
-        ({ segment, color }) =>
-          new AMap.Polyline({
-            map,
-            path: segment.path,
-            zIndex: segment.mode === 'WALK' ? 39 : 42,
-            isOutline: true,
-            outlineColor: '#ffffff',
-            borderWeight: 2,
-            strokeColor: color,
-            strokeOpacity: segment.mode === 'WALK' ? 0.82 : 1,
-            strokeWeight: segment.mode === 'WALK' ? 4 : 8,
-            strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
-            lineJoin: 'round',
-            lineCap: 'round',
-          }),
+      const representativeRouteIds = new Set(
+        (data.directions.to.accessRoutes ?? [])
+          .map((accessRoute) => accessRoute.farthestRouteId)
+          .filter((routeId): routeId is string => Boolean(routeId)),
       );
+      representativeRouteIds.add(activeStation.logicalId);
+      const overviewRoutes = data.directions.to.stations
+        .filter(
+          (station) =>
+            representativeRouteIds.has(station.logicalId) &&
+            station.routeGeometry.length > 0,
+        )
+        .sort((left, right) =>
+          left.logicalId === activeStation.logicalId
+            ? 1
+            : right.logicalId === activeStation.logicalId
+              ? -1
+              : 0,
+        );
+      const routePolylines = overviewRoutes.flatMap((routeStation) => {
+        const isActive = routeStation.logicalId === activeStation.logicalId;
+        return routeVisuals(routeStation).map(
+          ({ segment, color }) =>
+            new AMap.Polyline({
+              map,
+              path: segment.path,
+              zIndex: isActive
+                ? segment.mode === 'WALK'
+                  ? 49
+                  : 52
+                : segment.mode === 'WALK'
+                  ? 35
+                  : 37,
+              isOutline: isActive,
+              outlineColor: '#ffffff',
+              borderWeight: isActive ? 2 : 0,
+              strokeColor: color,
+              strokeOpacity: isActive
+                ? segment.mode === 'WALK'
+                  ? 0.82
+                  : 1
+                : 0.34,
+              strokeWeight: isActive
+                ? segment.mode === 'WALK'
+                  ? 4
+                  : 8
+                : segment.mode === 'WALK'
+                  ? 3
+                  : 5,
+              strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
+              lineJoin: 'round',
+              lineCap: 'round',
+            }),
+        );
+      });
       overlaysRef.current.push(...routePolylines);
       focusOverlays.push(...routePolylines);
 
@@ -926,14 +971,14 @@ export function CommutePlanner() {
       const startMarkers = stations
         .filter((station) => selectedStationIds.includes(station.id))
         .map(
-          (station) =>
+          (station, index) =>
             new AMap.Marker({
               map,
               position: parseLocation(station.location),
               anchor: 'center',
               zIndex: 120,
               title: `公司侧接驳站：${station.name}`,
-              content: '<span class="route-start-marker">司</span>',
+              content: `<span class="route-start-marker">司${index + 1}</span>`,
             }),
         );
       overlaysRef.current.push(...startMarkers);
@@ -957,7 +1002,7 @@ export function CommutePlanner() {
           position: parseLocation(station.location),
           anchor: 'center',
           zIndex: isActive ? 135 : 80,
-          title: `${station.name} · ${station.durationMinutes} 分钟`,
+          title: `${station.name} → ${station.accessStation.name} · ${station.durationMinutes} 分钟`,
           content,
         });
         if (isActive) focusOverlays.push(marker);
@@ -1166,6 +1211,22 @@ export function CommutePlanner() {
         (station) => station.logicalId === activeRouteId,
       ) ?? reachability.directions.to.farthest)
     : null;
+  const accessRouteGroups = (
+    reachability?.directions.to.accessRoutes ?? []
+  ).map((group, index) => ({
+    ...group,
+    index: index + 1,
+    routes: group.routeIds
+      .map((routeId) =>
+        reachability?.directions.to.stations.find(
+          (station) => station.logicalId === routeId,
+        ),
+      )
+      .filter((station): station is ReachableStation => Boolean(station)),
+  }));
+  const overviewRouteCount = accessRouteGroups.filter(
+    (group) => group.farthestRouteId,
+  ).length;
   const seenLegendLines = new Set<string>();
   const routeLineLegend = routeVisuals(activeRouteStation)
     .filter(({ segment, lineKey }) => {
@@ -1652,7 +1713,7 @@ export function CommutePlanner() {
                   <span className="step-kicker">04 · 通勤圈结果</span>
                   <strong>
                     住所到公司可达 {reachability.directions.to.reachableCount}{' '}
-                    个
+                    条路线
                   </strong>
                 </div>
                 <Radar aria-hidden="true" />
@@ -1719,9 +1780,7 @@ export function CommutePlanner() {
                 <section className="direction-result">
                   <div className="direction-result-heading">
                     <strong>住所 → 公司</strong>
-                    <span>
-                      {reachability.directions.to.reachableCount} 个可达样本
-                    </span>
+                    <span>{accessRouteGroups.length} 个接驳站分别计算</span>
                   </div>
 
                   {reachability.directions.to.farthest ? (
@@ -1794,56 +1853,85 @@ export function CommutePlanner() {
                     <p className="direction-empty">暂无有效候选路线</p>
                   )}
 
-                  <div className="reachability-list">
-                    {reachability.directions.to.stations
-                      .slice(0, 4)
-                      .map((station, index) => (
-                        <button
-                          type="button"
-                          key={station.id}
-                          className={
-                            activeRouteId === station.logicalId
-                              ? 'is-active'
-                              : undefined
-                          }
-                          aria-pressed={activeRouteId === station.logicalId}
-                          onClick={() => activateRoute(station)}
-                        >
-                          <span className="result-rank">{index + 1}</span>
-                          <span>
-                            <strong>{station.name}</strong>
-                            <small>
-                              {station.mode === 'BUS'
-                                ? '公交站'
-                                : station.mode === 'LIGHT_RAIL'
-                                  ? '有轨电车 / 轻轨'
-                                  : '地铁站'}{' '}
-                              · 直线{' '}
-                              {(station.straightLineMeters / 1000).toFixed(1)}{' '}
-                              公里
-                            </small>
-                            <small>
-                              公交 {station.transitDurationMinutes} + 步行{' '}
-                              {station.accessStation.walkingMinutes} 分钟
-                            </small>
-                            {station.routeLines.length > 0 && (
-                              <small>
-                                {station.routeLines.slice(0, 3).join(' / ')}
-                              </small>
-                            )}
-                          </span>
-                          <span className="duration-chip">
-                            {activeRouteId === station.logicalId
-                              ? '已高亮'
-                              : `${station.durationMinutes} 分钟`}
-                          </span>
-                        </button>
-                      ))}
+                  <div className="access-route-groups">
+                    {accessRouteGroups.map((group) => (
+                      <section
+                        className="access-route-group"
+                        key={group.accessStationId}
+                      >
+                        <div className="access-route-group-heading">
+                          <strong>
+                            <span>司{group.index}</span>
+                            {group.accessStationName}
+                          </strong>
+                          <small>{group.reachableCount} 条可达路线</small>
+                        </div>
+                        {group.routes.length > 0 ? (
+                          <div className="reachability-list">
+                            {group.routes.map((station, routeIndex) => (
+                              <button
+                                type="button"
+                                key={station.logicalId}
+                                className={
+                                  activeRouteId === station.logicalId
+                                    ? 'is-active'
+                                    : undefined
+                                }
+                                aria-pressed={
+                                  activeRouteId === station.logicalId
+                                }
+                                onClick={() => activateRoute(station)}
+                              >
+                                <span className="result-rank">
+                                  {routeIndex + 1}
+                                </span>
+                                <span>
+                                  <strong>{station.name}</strong>
+                                  <small>
+                                    {station.mode === 'BUS'
+                                      ? '公交站'
+                                      : station.mode === 'LIGHT_RAIL'
+                                        ? '有轨电车 / 轻轨'
+                                        : '地铁站'}{' '}
+                                    · 直线{' '}
+                                    {(
+                                      station.straightLineMeters / 1000
+                                    ).toFixed(1)}{' '}
+                                    公里
+                                  </small>
+                                  <small>
+                                    到 {station.accessStation.name} · 公交{' '}
+                                    {station.transitDurationMinutes} + 步行{' '}
+                                    {station.accessStation.walkingMinutes} 分钟
+                                  </small>
+                                  {station.routeLines.length > 0 && (
+                                    <small>
+                                      {station.routeLines
+                                        .slice(0, 3)
+                                        .join(' / ')}
+                                    </small>
+                                  )}
+                                </span>
+                                <span className="duration-chip">
+                                  {activeRouteId === station.logicalId
+                                    ? '已高亮'
+                                    : `${station.durationMinutes} 分钟`}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="direction-empty">
+                            当前预算内没有经该接驳站到公司的可达样本
+                          </p>
+                        )}
+                      </section>
+                    ))}
                   </div>
                 </section>
               </div>
               <p className="sampling-note">
-                候选来自所选接驳站的实际线路站序，只核验住所到公司的公共交通路线；点击候选可切换并高亮其完整路线。
+                每个接驳站分别保留可达路线；地图默认同时显示各站最远路线，点击候选可单独高亮并查看完整途经站。
               </p>
             </div>
           )}
@@ -1891,6 +1979,12 @@ export function CommutePlanner() {
                   <i className="legend-farthest" />
                   最远可达
                 </span>
+                {overviewRouteCount > 1 && (
+                  <span>
+                    <i className="legend-overview-route" />
+                    其他接驳站路线
+                  </span>
+                )}
                 {routeLineLegend.map((line) => (
                   <span key={line.key} title={line.label}>
                     <i

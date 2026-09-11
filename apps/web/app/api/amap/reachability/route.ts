@@ -172,6 +172,13 @@ type DirectionReachability = {
   farthest: ReachableStation | null;
   nearMisses: ReachableStation[];
   stations: ReachableStation[];
+  accessRoutes: Array<{
+    accessStationId: string;
+    accessStationName: string;
+    reachableCount: number;
+    farthestRouteId: string | null;
+    routeIds: string[];
+  }>;
 };
 
 type ReachabilityResult = {
@@ -596,19 +603,21 @@ async function evaluateDirection(
     (item): item is typeof item & { route: NonNullable<typeof item.route> } =>
       Boolean(item.route),
   );
-  const bestByStation = new Map<string, (typeof validPairs)[number]>();
+  const bestByStationAndAccess = new Map<string, (typeof validPairs)[number]>();
   for (const item of validPairs) {
-    const existing = bestByStation.get(item.station.logicalId);
+    const pairId = `${item.station.logicalId}::${item.route.accessStation.id}`;
+    const existing = bestByStationAndAccess.get(pairId);
     if (
       !existing ||
       item.route.durationSeconds < existing.route.durationSeconds
     ) {
-      bestByStation.set(item.station.logicalId, item);
+      bestByStationAndAccess.set(pairId, item);
     }
   }
-  const successful = [...bestByStation.values()];
+  const successful = [...bestByStationAndAccess.values()];
   const evaluated = successful.map<ReachableStation>(({ station, route }) => ({
     ...station,
+    logicalId: `${station.logicalId}::${route.accessStation.id}`,
     transitDurationSeconds: route.transitDurationSeconds,
     transitDurationMinutes: Math.ceil(route.transitDurationSeconds / 60),
     durationSeconds: route.durationSeconds,
@@ -636,12 +645,36 @@ async function evaluateDirection(
     .sort((left, right) => left.durationSeconds - right.durationSeconds)
     .slice(0, 3);
   const farthest = reachable[0] ?? null;
+  const accessRoutes = activeAccessStations.map((accessStation) => {
+    const routes = reachable.filter(
+      (station) => station.accessStation.id === accessStation.id,
+    );
+    return {
+      accessStationId: accessStation.id,
+      accessStationName: accessStation.name,
+      reachableCount: routes.length,
+      farthestRouteId: routes[0]?.logicalId ?? null,
+      routeIds: routes.slice(0, 2).map((station) => station.logicalId),
+    };
+  });
+  const featuredRouteIds = new Set(
+    accessRoutes.flatMap((accessRoute) => accessRoute.routeIds),
+  );
+  const orderedRoutes = [
+    ...reachable.filter((station) => featuredRouteIds.has(station.logicalId)),
+    ...reachable.filter((station) => !featuredRouteIds.has(station.logicalId)),
+  ].slice(0, 12);
+  const geometryRouteIds = new Set(
+    orderedRoutes
+      .slice(0, Math.max(6, accessRoutes.length))
+      .map((station) => station.logicalId),
+  );
 
   return {
     direction: 'to',
     routeCheckCount: routePairs.length,
     checkedCount: successful.length,
-    failedCount: candidates.length - successful.length,
+    failedCount: routePairs.length - successful.length,
     reachableCount: reachable.length,
     fastestCandidateMinutes:
       successful.length > 0
@@ -655,11 +688,12 @@ async function evaluateDirection(
       ...station,
       routeGeometry: [],
     })),
-    stations: reachable
-      .slice(0, 12)
-      .map((station, index) =>
-        index < 4 ? station : { ...station, routeGeometry: [] },
-      ),
+    stations: orderedRoutes.map((station) =>
+      geometryRouteIds.has(station.logicalId)
+        ? station
+        : { ...station, routeGeometry: [] },
+    ),
+    accessRoutes,
   };
 }
 
@@ -756,6 +790,7 @@ export async function POST(request: Request) {
     }),
   );
   const cacheKey = [
+    'multi-access-v1',
     anchor.id,
     anchor.location,
     budgetMinutes,
