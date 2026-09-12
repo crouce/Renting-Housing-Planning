@@ -286,8 +286,8 @@ function launchDevelopmentServer(repairAttempted) {
     setupStatus = {
       phase: "running",
       message: existingServerDetected
-        ? "检测到通勤圈已经在运行，可以直接打开。"
-        : "通勤圈已成功启动。",
+        ? "检测到通勤圈已经在运行，点击下方按钮进入。"
+        : "通勤圈已成功启动，点击下方按钮进入。",
       appUrl: detectedAppUrl,
       details: null,
     };
@@ -311,7 +311,7 @@ function launchDevelopmentServer(repairAttempted) {
     if (existingServerDetected && reachedRunningState && detectedAppUrl) {
       setupStatus = {
         phase: "running",
-        message: "检测到通勤圈已经在运行，可以直接打开。",
+        message: "检测到通勤圈已经在运行，点击下方按钮进入。",
         appUrl: detectedAppUrl,
         details: null,
       };
@@ -451,8 +451,10 @@ function renderPage() {
     .status { margin-top: 16px; border-radius: 11px; background: #f0f5f2; padding: 11px 13px; color: #426055; font-size: 13px; line-height: 1.5; }
     .status.is-error { background: #fff0ed; color: #a63d2f; }
     .status.is-running { background: #e4f2eb; color: #1c684f; }
-    .app-link { display: none; margin-top: 10px; color: #1c684f; font-weight: 800; }
-    .app-link.is-visible { display: inline-flex; }
+    .app-link { display: none; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 8px; margin-top: 12px; border-radius: 12px; background: #e8533f; color: #fff; box-shadow: 0 10px 24px rgba(232, 83, 63, .24); font-size: 16px; font-weight: 800; text-decoration: none; transition: transform .16s ease, background .16s ease, box-shadow .16s ease; }
+    .app-link.is-visible { display: flex; }
+    .app-link:hover { background: #d94734; box-shadow: 0 12px 28px rgba(232, 83, 63, .3); transform: translateY(-1px); }
+    .app-link:focus-visible { outline: 3px solid rgba(232, 83, 63, .3); outline-offset: 3px; }
     .diagnostics { margin-top: 14px; border: 1px solid #ead4cf; border-radius: 11px; background: #fff8f6; padding: 10px 12px; }
     .diagnostics[hidden] { display: none; }
     .diagnostics summary { color: #943d30; }
@@ -497,7 +499,7 @@ function renderPage() {
           </div>
         </form>
         <div id="status" class="status" role="status" aria-live="polite">${setupStatus.message}</div>
-        <a id="app-link" class="app-link" href="#">打开通勤圈 →</a>
+        <a id="app-link" class="app-link" href="#">打开通勤圈 <span aria-hidden="true">→</span></a>
         <details id="diagnostics-panel" class="diagnostics" hidden open><summary>启动错误详情</summary><pre id="diagnostics-text"></pre><button id="copy-log" class="copy-log" type="button">复制错误信息</button></details>
         <details><summary>还没有高德 Key？</summary><p>请先在高德开放平台创建 JS API Key 和 Web 服务 API Key。浏览器 Key 与服务端 Key 用途不同，不建议混用。</p></details>
       </main>

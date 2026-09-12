@@ -65,6 +65,7 @@ test("识别 apps/web 下带 BOM、引号和 export 的环境配置且不回显�
     assert.equal(response.status, 200);
     assert.match(html, /已识别 apps\/web\/\.env\.local/);
     assert.equal((html.match(/class="field-state is-detected"/g) ?? []).length, 3);
+    assert.match(html, /class="app-link"[^>]*>打开通勤圈/);
     for (const secret of secretValues) assert.equal(html.includes(secret), false);
   } finally {
     assistant.child.kill("SIGTERM");
