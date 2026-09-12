@@ -10,6 +10,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryDirectory = path.resolve(scriptDirectory, "..");
 const webDirectory = path.join(repositoryDirectory, "apps", "web");
 const environmentPath = path.join(repositoryDirectory, ".env.local");
+const webEnvironmentPath = path.join(webDirectory, ".env.local");
 const logPath = path.join(repositoryDirectory, "local-setup.log");
 const csrfToken = randomBytes(24).toString("hex");
 const skipBrowserOpen =
@@ -19,14 +20,29 @@ const nodeVersion = process.versions.node;
 const [nodeMajor, nodeMinor] = nodeVersion.split(".").map(Number);
 const nodeSupported = nodeMajor > 22 || (nodeMajor === 22 && nodeMinor >= 13);
 
-let environmentConfigured = await hasCompleteEnvironment();
+const requiredEnvironmentNames = [
+  "NEXT_PUBLIC_AMAP_JS_KEY",
+  "NEXT_PUBLIC_AMAP_JS_SECURITY_CODE",
+  "AMAP_WEB_SERVICE_KEY",
+];
+const environmentInputNames = {
+  NEXT_PUBLIC_AMAP_JS_KEY: "jsKey",
+  NEXT_PUBLIC_AMAP_JS_SECURITY_CODE: "securityCode",
+  AMAP_WEB_SERVICE_KEY: "webServiceKey",
+  AMAP_API_BASE_URL: "apiBaseUrl",
+  AMAP_DEFAULT_CITY_CODE: "cityCode",
+  AMAP_DEFAULT_ADCODE: "adcode",
+};
+
+let environmentState = await inspectEnvironment();
+let environmentConfigured = environmentState.complete;
 let devProcess = null;
 let startupTimer = null;
 let setupOrigin = "";
 let lastCommandOutput = "";
 let setupStatus = {
   phase: "ready",
-  message: environmentConfigured ? "检测到已有高德配置，可以直接启动。" : "请填写高德配置。",
+  message: environmentState.message,
   appUrl: null,
   details: null,
 };
@@ -38,26 +54,66 @@ try {
 function parseEnvironment(contents) {
   const values = new Map();
   for (const rawLine of contents.split(/\r?\n/)) {
-    const line = rawLine.trim();
+    const line = rawLine.replace(/^\uFEFF/, "").trim();
     if (!line || line.startsWith("#")) continue;
-    const separator = line.indexOf("=");
+    const declaration = line.replace(/^export\s+/, "");
+    const separator = declaration.indexOf("=");
     if (separator < 1) continue;
-    values.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
+    const name = declaration.slice(0, separator).trim();
+    let value = declaration.slice(separator + 1).trim();
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1);
+    }
+    values.set(name, value);
   }
   return values;
 }
 
-async function hasCompleteEnvironment() {
-  try {
-    const values = parseEnvironment(await readFile(environmentPath, "utf8"));
-    return [
-      "NEXT_PUBLIC_AMAP_JS_KEY",
-      "NEXT_PUBLIC_AMAP_JS_SECURITY_CODE",
-      "AMAP_WEB_SERVICE_KEY",
-    ].every((name) => Boolean(values.get(name)));
-  } catch {
-    return false;
+async function inspectEnvironment() {
+  const values = new Map();
+  const sources = new Map();
+  const detectedFiles = [];
+  const candidates = [
+    { filePath: environmentPath, label: "项目根目录 .env.local" },
+    { filePath: webEnvironmentPath, label: "apps/web/.env.local" },
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const fileValues = parseEnvironment(await readFile(candidate.filePath, "utf8"));
+      detectedFiles.push(candidate.label);
+      for (const [name, value] of fileValues) {
+        if (!values.has(name) && value) {
+          values.set(name, value);
+          sources.set(name, candidate.label);
+        }
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
   }
+
+  const complete = requiredEnvironmentNames.every((name) => Boolean(values.get(name)));
+  const detectedCount = requiredEnvironmentNames.filter((name) => Boolean(values.get(name))).length;
+  const webOnly =
+    complete &&
+    requiredEnvironmentNames.some((name) => sources.get(name) === "apps/web/.env.local");
+  let message = "请填写高德配置。";
+  if (complete && webOnly) {
+    message = "已识别 apps/web/.env.local；启动时会安全合并到项目根目录。";
+  } else if (complete) {
+    message = "已识别项目根目录的 .env.local，可以直接启动。";
+  } else if (detectedCount > 0) {
+    message = `已识别 ${detectedCount}/3 项必要配置，请补齐标记为“待填写”的项目。`;
+  } else if (detectedFiles.length > 0) {
+    message = "找到了 .env.local，但未识别到所需的高德配置项。";
+  }
+
+  return { values, sources, detectedFiles, complete, message };
 }
 
 function cleanValue(value, required = false) {
@@ -69,12 +125,20 @@ function cleanValue(value, required = false) {
 }
 
 async function saveEnvironment(input) {
-  const jsKey = cleanValue(input.jsKey, true);
-  const securityCode = cleanValue(input.securityCode, true);
-  const webServiceKey = cleanValue(input.webServiceKey, true);
-  const apiBaseUrl = cleanValue(input.apiBaseUrl) || "https://restapi.amap.com";
-  const cityCode = cleanValue(input.cityCode);
-  const adcode = cleanValue(input.adcode);
+  const current = await inspectEnvironment();
+  const resolved = {};
+  for (const [environmentName, inputName] of Object.entries(environmentInputNames)) {
+    const provided = cleanValue(input?.[inputName]);
+    if (provided === null) throw new Error("配置内容不能包含换行。");
+    resolved[environmentName] = provided || current.values.get(environmentName) || "";
+  }
+
+  const jsKey = resolved.NEXT_PUBLIC_AMAP_JS_KEY;
+  const securityCode = resolved.NEXT_PUBLIC_AMAP_JS_SECURITY_CODE;
+  const webServiceKey = resolved.AMAP_WEB_SERVICE_KEY;
+  const apiBaseUrl = resolved.AMAP_API_BASE_URL || "https://restapi.amap.com";
+  const cityCode = resolved.AMAP_DEFAULT_CITY_CODE;
+  const adcode = resolved.AMAP_DEFAULT_ADCODE;
 
   if (!jsKey || !securityCode || !webServiceKey || !apiBaseUrl) {
     throw new Error("请完整填写三项高德密钥配置。");
@@ -109,7 +173,8 @@ async function saveEnvironment(input) {
     encoding: "utf8",
     mode: 0o600,
   });
-  environmentConfigured = true;
+  environmentState = await inspectEnvironment();
+  environmentConfigured = environmentState.complete;
 }
 
 function commandForNpm(arguments_) {
@@ -328,7 +393,16 @@ function readJson(request) {
 }
 
 function renderPage() {
-  const existingConfiguration = environmentConfigured ? "true" : "false";
+  const fieldState = (environmentName) => {
+    const detected = Boolean(environmentState.values.get(environmentName));
+    return {
+      badge: `<span class="field-state ${detected ? "is-detected" : ""}">${detected ? "已识别" : "待填写"}</span>`,
+      attributes: detected ? 'placeholder="已从 .env.local 识别，留空即可保留"' : "required",
+    };
+  };
+  const jsKeyState = fieldState("NEXT_PUBLIC_AMAP_JS_KEY");
+  const securityCodeState = fieldState("NEXT_PUBLIC_AMAP_JS_SECURITY_CODE");
+  const webServiceKeyState = fieldState("AMAP_WEB_SERVICE_KEY");
   const nodeStateClass = nodeSupported ? "is-complete" : "is-error";
   const nodeStateText = nodeSupported
     ? `Node.js ${nodeVersion} 已就绪`
@@ -362,6 +436,9 @@ function renderPage() {
     .checks li.is-error::before { content: "!"; background: #fff0ed; color: #d44936; }
     fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; border: 0; margin: 0; padding: 0; }
     label { display: grid; gap: 7px; color: #405049; font-size: 13px; font-weight: 750; }
+    .label-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .field-state { border-radius: 999px; background: #fff0ed; padding: 3px 8px; color: #b24a3b; font-size: 10px; font-weight: 800; }
+    .field-state.is-detected { background: #e4f2eb; color: #1c684f; }
     label.full { grid-column: 1 / -1; }
     input { width: 100%; height: 42px; border: 1px solid #ced9d4; border-radius: 10px; background: #fafcfb; padding: 0 12px; color: #20332c; outline: none; }
     input:focus { border-color: #2a755d; box-shadow: 0 0 0 3px rgba(42, 117, 93, .12); }
@@ -407,9 +484,9 @@ function renderPage() {
         </ol>
         <form id="setup-form">
           <fieldset>
-            <label class="full">高德 JS API Key<input name="jsKey" autocomplete="off" required><span class="hint">用于浏览器地图显示，请允许 localhost。</span></label>
-            <label class="full">JS API 安全密钥<input name="securityCode" type="password" autocomplete="new-password" required></label>
-            <label class="full">Web 服务 API Key<input name="webServiceKey" type="password" autocomplete="new-password" required><span class="hint">仅写入本机服务端配置。</span></label>
+            <label class="full"><span class="label-title">高德 JS API Key ${jsKeyState.badge}</span><input name="jsKey" autocomplete="off" ${jsKeyState.attributes}><span class="hint">用于浏览器地图显示，请允许 localhost。</span></label>
+            <label class="full"><span class="label-title">JS API 安全密钥 ${securityCodeState.badge}</span><input name="securityCode" type="password" autocomplete="new-password" ${securityCodeState.attributes}></label>
+            <label class="full"><span class="label-title">Web 服务 API Key ${webServiceKeyState.badge}</span><input name="webServiceKey" type="password" autocomplete="new-password" ${webServiceKeyState.attributes}><span class="hint">仅写入本机服务端配置。</span></label>
             <label>默认城市代码（可选）<input name="cityCode" placeholder="例如 027"></label>
             <label>默认行政区代码（可选）<input name="adcode" placeholder="例如 420100"></label>
             <label class="full">Web 服务地址<input name="apiBaseUrl" value="https://restapi.amap.com" required></label>
@@ -533,6 +610,7 @@ const server = http.createServer(async (request, response) => {
         if (!environmentConfigured) {
           throw new Error("没有找到完整的已有配置。");
         }
+        await saveEnvironment({});
       } else {
         await saveEnvironment(input);
       }
