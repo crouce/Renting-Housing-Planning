@@ -1473,6 +1473,17 @@ input {
 .access-route-group .direction-empty {
   margin: 8px;
 }
+.direction-status-list {
+  display: grid;
+  gap: 4px;
+  border-top: 1px dashed #dfe7e3;
+  padding: 8px 10px;
+  color: #7a817e;
+}
+.direction-status-list small {
+  font-size: 9px;
+  line-height: 1.45;
+}
 .reachability-list {
   margin-top: 10px;
 }

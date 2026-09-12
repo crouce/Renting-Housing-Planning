@@ -119,6 +119,21 @@ type CandidateStation = {
   adcode: string;
 };
 
+type AccessLineSeed = {
+  accessStation: AccessStationWithWalk;
+  lineName: string;
+  citycode: string;
+};
+
+type LineDirectionContext = {
+  id: string;
+  accessStation: AccessStationWithWalk;
+  requestedLineName: string;
+  line: AMapBusLine;
+  directionLabel: string;
+  candidates: CandidateStation[];
+};
+
 type RouteGeometrySegment = {
   mode: 'WALK' | 'TRANSIT';
   path: Array<[number, number]>;
@@ -143,6 +158,13 @@ type ReachableStation = CandidateStation & {
   routeLines: string[];
   matchedLines: string[];
   routeGeometry: RouteGeometrySegment[];
+  lineDirection: {
+    id: string;
+    lineName: string;
+    directionLabel: string;
+    startStopName: string;
+    endStopName: string;
+  };
   accessStation: {
     id: string;
     name: string;
@@ -178,6 +200,17 @@ type DirectionReachability = {
     reachableCount: number;
     farthestRouteId: string | null;
     routeIds: string[];
+    directions: Array<{
+      id: string;
+      lineName: string;
+      directionLabel: string;
+      startStopName: string;
+      endStopName: string;
+      candidateCount: number;
+      routeCheckCount: number;
+      status: 'reachable' | 'over_budget' | 'no_route' | 'no_candidate';
+      farthestRouteId: string | null;
+    }>;
   }>;
 };
 
@@ -342,14 +375,6 @@ function collectRouteGeometry(
   return geometry;
 }
 
-function selectEvenly<T>(items: T[], limit: number) {
-  if (items.length <= limit) return items;
-  return Array.from({ length: limit }, (_, index) => {
-    const itemIndex = Math.floor((index * items.length) / limit);
-    return items[itemIndex];
-  });
-}
-
 async function expandTransitLine(lineName: string, citycode: string) {
   const result = await amapRequest<BusLineResponse>(
     '/v3/bus/linename',
@@ -372,55 +397,109 @@ async function expandTransitLine(lineName: string, citycode: string) {
   );
 }
 
-function collectLineCandidates(
-  lines: AMapBusLine[],
-  accessStations: AccessStationWithWalk[],
-  anchorLocation: string,
+function nearestLineStopIndex(
+  line: AMapBusLine,
+  accessStation: AccessStationWithWalk,
 ) {
-  const candidates = new Map<string, CandidateStation>();
-  for (const line of lines) {
-    const displayLineName = line.name?.split('(')[0].trim() ?? '';
-    for (const stop of line.busstops ?? []) {
+  const stops = line.busstops ?? [];
+  const exactIndex = stops.findIndex((stop) => stop.id === accessStation.id);
+  if (exactIndex >= 0) return exactIndex;
+
+  let nearestIndex = -1;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const [index, stop] of stops.entries()) {
+    if (!stop.location || !locationPattern.test(stop.location)) continue;
+    const distance = straightLineDistance(
+      accessStation.location,
+      stop.location,
+    );
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = index;
+    }
+  }
+  return nearestDistance <= 600 ? nearestIndex : -1;
+}
+
+function createLineDirectionContext(
+  seed: AccessLineSeed,
+  line: AMapBusLine,
+): LineDirectionContext | null {
+  if (!line.id) return null;
+  const accessStopIndex = nearestLineStopIndex(line, seed.accessStation);
+  if (accessStopIndex < 0) return null;
+
+  const displayLineName =
+    line.name?.split('(')[0].trim() || seed.lineName.split('(')[0].trim();
+  const directionLabel = line.end_stop
+    ? `开往 ${line.end_stop}`
+    : `${line.start_stop ?? '起点'} → ${line.end_stop ?? '终点'}`;
+  const id = `${seed.accessStation.id}::${line.id}`;
+  const candidates = (line.busstops ?? [])
+    .slice(0, accessStopIndex)
+    .flatMap((stop) => {
       if (
         !stop.id ||
         !stop.name ||
         !stop.location ||
         !locationPattern.test(stop.location) ||
-        accessStations.some(
-          (accessStation) =>
-            straightLineDistance(accessStation.location, stop.location!) < 250,
-        )
+        straightLineDistance(seed.accessStation.location, stop.location) < 250
       ) {
-        continue;
+        return [];
       }
+      return [
+        {
+          id: stop.id,
+          logicalId: `${id}::${stop.id}`,
+          name: stop.name,
+          location: stop.location,
+          mode: lineMode(line),
+          address: directionLabel,
+          lines: displayLineName ? [displayLineName] : [],
+          citycode: line.citycode ?? seed.citycode,
+          adcode: '',
+        } satisfies CandidateStation,
+      ];
+    })
+    .reverse();
 
-      const logicalId = stop.id;
-      const existing = candidates.get(logicalId);
-      if (existing) {
-        if (displayLineName && !existing.lines.includes(displayLineName)) {
-          existing.lines.push(displayLineName);
-        }
-        continue;
-      }
-      candidates.set(logicalId, {
-        id: stop.id,
-        logicalId,
-        name: stop.name,
-        location: stop.location,
-        mode: lineMode(line),
-        address: displayLineName,
-        lines: displayLineName ? [displayLineName] : [],
-        citycode: line.citycode ?? accessStations[0]?.citycode ?? '',
-        adcode: '',
+  return {
+    id,
+    accessStation: seed.accessStation,
+    requestedLineName: seed.lineName,
+    line,
+    directionLabel,
+    candidates,
+  };
+}
+
+function selectLineSeedsFairly(
+  accessStations: AccessStationWithWalk[],
+  limit: number,
+) {
+  const queues = accessStations.map((accessStation) => ({
+    accessStation,
+    lineNames:
+      accessStation.allowedLines.length > 0
+        ? accessStation.allowedLines
+        : accessStation.availableLines,
+  }));
+  const seeds: AccessLineSeed[] = [];
+  for (let lineIndex = 0; seeds.length < limit; lineIndex += 1) {
+    let added = false;
+    for (const queue of queues) {
+      const lineName = queue.lineNames[lineIndex];
+      if (!lineName || seeds.length >= limit) continue;
+      seeds.push({
+        accessStation: queue.accessStation,
+        lineName,
+        citycode: queue.accessStation.citycode,
       });
+      added = true;
     }
+    if (!added) break;
   }
-
-  return [...candidates.values()].sort(
-    (left, right) =>
-      straightLineDistance(anchorLocation, right.location) -
-      straightLineDistance(anchorLocation, left.location),
-  );
+  return seeds;
 }
 
 async function runThrottled<T, R>(
@@ -577,66 +656,120 @@ async function planTransit(
 }
 
 async function evaluateDirection(
-  candidates: CandidateStation[],
+  contexts: LineDirectionContext[],
   activeAccessStations: AccessStationWithWalk[],
   departureDate: string,
   departureTime: string,
   anchorLocation: string,
 ): Promise<DirectionReachability> {
-  const routePairs = candidates.flatMap((station) =>
-    activeAccessStations.map((accessStation) => ({ station, accessStation })),
-  );
-  const plannedPairs = await runThrottled(
-    routePairs,
-    450,
-    async ({ station, accessStation }) => ({
-      station,
-      route: await planTransit(
+  const maxChecksPerDirection =
+    contexts.length <= 6 ? 4 : contexts.length <= 12 ? 3 : 2;
+  const evaluations: Array<{
+    context: LineDirectionContext;
+    routeCheckCount: number;
+    failedCount: number;
+    successful: ReachableStation[];
+    best: ReachableStation | null;
+  }> = [];
+
+  for (const context of contexts) {
+    let routeCheckCount = 0;
+    let failedCount = 0;
+    const successful: ReachableStation[] = [];
+    let best: ReachableStation | null = null;
+    const restrictedAccessStation = {
+      ...context.accessStation,
+      allowedLines: [context.requestedLineName],
+    };
+    const evaluateCandidate = async (candidateIndex: number) => {
+      const station = context.candidates[candidateIndex];
+      routeCheckCount += 1;
+      const route = await planTransit(
         station,
-        accessStation,
+        restrictedAccessStation,
         departureDate,
         departureTime,
-      ),
-    }),
-  );
-  const validPairs = plannedPairs.filter(
-    (item): item is typeof item & { route: NonNullable<typeof item.route> } =>
-      Boolean(item.route),
-  );
-  const bestByStationAndAccess = new Map<string, (typeof validPairs)[number]>();
-  for (const item of validPairs) {
-    const pairId = `${item.station.logicalId}::${item.route.accessStation.id}`;
-    const existing = bestByStationAndAccess.get(pairId);
-    if (
-      !existing ||
-      item.route.durationSeconds < existing.route.durationSeconds
-    ) {
-      bestByStationAndAccess.set(pairId, item);
+      );
+      if (!route) {
+        failedCount += 1;
+        return null;
+      }
+      const evaluated: ReachableStation = {
+        ...station,
+        logicalId: `${station.logicalId}::result`,
+        transitDurationSeconds: route.transitDurationSeconds,
+        transitDurationMinutes: Math.ceil(route.transitDurationSeconds / 60),
+        durationSeconds: route.durationSeconds,
+        durationMinutes: Math.ceil(route.durationSeconds / 60),
+        straightLineMeters: straightLineDistance(
+          anchorLocation,
+          station.location,
+        ),
+        segmentCount: route.segmentCount,
+        routeLines: route.routeLines,
+        matchedLines: route.matchedLines,
+        routeGeometry: route.routeGeometry,
+        lineDirection: {
+          id: context.id,
+          lineName: context.requestedLineName,
+          directionLabel: context.directionLabel,
+          startStopName: context.line.start_stop ?? '',
+          endStopName: context.line.end_stop ?? '',
+        },
+        accessStation: route.accessStation,
+      };
+      successful.push(evaluated);
+      return evaluated;
+    };
+
+    if (context.candidates.length > 0) {
+      let low = 0;
+      let high = context.candidates.length - 1;
+      const endpoint = await evaluateCandidate(high);
+      if (
+        endpoint &&
+        endpoint.transitDurationSeconds <=
+          endpoint.accessStation.remainingTransitSeconds
+      ) {
+        best = endpoint;
+      } else {
+        high -= 1;
+        while (low <= high && routeCheckCount < maxChecksPerDirection) {
+          const middle = Math.ceil((low + high) / 2);
+          const evaluated = await evaluateCandidate(middle);
+          if (
+            evaluated &&
+            evaluated.transitDurationSeconds <=
+              evaluated.accessStation.remainingTransitSeconds
+          ) {
+            best = evaluated;
+            low = middle + 1;
+          } else {
+            high = middle - 1;
+          }
+          if (routeCheckCount < maxChecksPerDirection) {
+            await new Promise((resolve) => setTimeout(resolve, 350));
+          }
+        }
+      }
     }
+    evaluations.push({
+      context,
+      routeCheckCount,
+      failedCount,
+      successful,
+      best,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 350));
   }
-  const successful = [...bestByStationAndAccess.values()];
-  const evaluated = successful.map<ReachableStation>(({ station, route }) => ({
-    ...station,
-    logicalId: `${station.logicalId}::${route.accessStation.id}`,
-    transitDurationSeconds: route.transitDurationSeconds,
-    transitDurationMinutes: Math.ceil(route.transitDurationSeconds / 60),
-    durationSeconds: route.durationSeconds,
-    durationMinutes: Math.ceil(route.durationSeconds / 60),
-    straightLineMeters: straightLineDistance(anchorLocation, station.location),
-    segmentCount: route.segmentCount,
-    routeLines: route.routeLines,
-    matchedLines: route.matchedLines,
-    routeGeometry: route.routeGeometry,
-    accessStation: route.accessStation,
-  }));
-  const reachable = evaluated
-    .filter(
-      (station) =>
-        station.transitDurationSeconds <=
-        station.accessStation.remainingTransitSeconds,
-    )
+
+  const reachable = evaluations
+    .flatMap((evaluation) => (evaluation.best ? [evaluation.best] : []))
     .sort((left, right) => right.straightLineMeters - left.straightLineMeters);
-  const nearMisses = evaluated
+  const allSuccessful = evaluations.flatMap(
+    (evaluation) => evaluation.successful,
+  );
+  const nearMisses = allSuccessful
     .filter(
       (station) =>
         station.transitDurationSeconds >
@@ -649,38 +782,53 @@ async function evaluateDirection(
     const routes = reachable.filter(
       (station) => station.accessStation.id === accessStation.id,
     );
+    const directionEvaluations = evaluations.filter(
+      (evaluation) => evaluation.context.accessStation.id === accessStation.id,
+    );
     return {
       accessStationId: accessStation.id,
       accessStationName: accessStation.name,
       reachableCount: routes.length,
       farthestRouteId: routes[0]?.logicalId ?? null,
-      routeIds: routes.slice(0, 2).map((station) => station.logicalId),
+      routeIds: routes.map((station) => station.logicalId),
+      directions: directionEvaluations.map((evaluation) => ({
+        id: evaluation.context.id,
+        lineName: evaluation.context.requestedLineName,
+        directionLabel: evaluation.context.directionLabel,
+        startStopName: evaluation.context.line.start_stop ?? '',
+        endStopName: evaluation.context.line.end_stop ?? '',
+        candidateCount: evaluation.context.candidates.length,
+        routeCheckCount: evaluation.routeCheckCount,
+        status: evaluation.best
+          ? ('reachable' as const)
+          : evaluation.context.candidates.length === 0
+            ? ('no_candidate' as const)
+            : evaluation.successful.length > 0
+              ? ('over_budget' as const)
+              : ('no_route' as const),
+        farthestRouteId: evaluation.best?.logicalId ?? null,
+      })),
     };
   });
-  const featuredRouteIds = new Set(
-    accessRoutes.flatMap((accessRoute) => accessRoute.routeIds),
-  );
-  const orderedRoutes = [
-    ...reachable.filter((station) => featuredRouteIds.has(station.logicalId)),
-    ...reachable.filter((station) => !featuredRouteIds.has(station.logicalId)),
-  ].slice(0, 12);
-  const geometryRouteIds = new Set(
-    orderedRoutes
-      .slice(0, Math.max(6, accessRoutes.length))
-      .map((station) => station.logicalId),
-  );
 
   return {
     direction: 'to',
-    routeCheckCount: routePairs.length,
-    checkedCount: successful.length,
-    failedCount: routePairs.length - successful.length,
+    routeCheckCount: evaluations.reduce(
+      (sum, evaluation) => sum + evaluation.routeCheckCount,
+      0,
+    ),
+    checkedCount: allSuccessful.length,
+    failedCount: evaluations.reduce(
+      (sum, evaluation) => sum + evaluation.failedCount,
+      0,
+    ),
     reachableCount: reachable.length,
     fastestCandidateMinutes:
-      successful.length > 0
+      allSuccessful.length > 0
         ? Math.ceil(
-            Math.min(...successful.map((item) => item.route.durationSeconds)) /
-              60,
+            Math.min(
+              ...allSuccessful.map((station) => station.durationSeconds),
+            ) / 60,
           )
         : null,
     farthest,
@@ -688,11 +836,7 @@ async function evaluateDirection(
       ...station,
       routeGeometry: [],
     })),
-    stations: orderedRoutes.map((station) =>
-      geometryRouteIds.has(station.logicalId)
-        ? station
-        : { ...station, routeGeometry: [] },
-    ),
+    stations: reachable,
     accessRoutes,
   };
 }
@@ -790,7 +934,7 @@ export async function POST(request: Request) {
     }),
   );
   const cacheKey = [
-    'multi-access-v1',
+    'station-line-direction-v2',
     anchor.id,
     anchor.location,
     budgetMinutes,
@@ -832,20 +976,7 @@ export async function POST(request: Request) {
     const activeAccessStations = plannedAccessStations.filter(
       (station) => station.remainingTransitSeconds > 0,
     );
-    const lineSeedMap = new Map<string, { name: string; citycode: string }>();
-    for (const station of activeAccessStations) {
-      const lineNames =
-        station.allowedLines.length > 0
-          ? station.allowedLines
-          : station.availableLines;
-      for (const lineName of lineNames) {
-        const key = `${station.citycode}:${normalizeLineName(lineName)}`;
-        if (!lineSeedMap.has(key)) {
-          lineSeedMap.set(key, { name: lineName, citycode: station.citycode });
-        }
-      }
-    }
-    const lineSeeds = [...lineSeedMap.values()].slice(0, 8);
+    const lineSeeds = selectLineSeedsFairly(activeAccessStations, 8);
     if (lineSeeds.length === 0) {
       return Response.json(
         {
@@ -862,25 +993,29 @@ export async function POST(request: Request) {
       250,
       async (seed) => {
         try {
-          return await expandTransitLine(seed.name, seed.citycode);
+          return {
+            seed,
+            lines: await expandTransitLine(seed.lineName, seed.citycode),
+          };
         } catch {
-          return [];
+          return { seed, lines: [] };
         }
       },
     );
-    const expandedLineMap = new Map<string, AMapBusLine>();
-    for (const line of expandedLineGroups.flat()) {
-      if (line.id && !expandedLineMap.has(line.id)) {
-        expandedLineMap.set(line.id, line);
-      }
-    }
-    const expandedLines = [...expandedLineMap.values()];
-    const allCandidates = collectLineCandidates(
-      expandedLines,
-      activeAccessStations,
-      validatedAnchor.location,
-    );
-    if (allCandidates.length === 0) {
+    const contexts = expandedLineGroups.flatMap(({ seed, lines }) => {
+      const seenDirections = new Set<string>();
+      const resolvedDirections = lines.flatMap((line) => {
+        const directionKey = `${line.start_stop ?? ''}::${line.end_stop ?? ''}`;
+        if (seenDirections.has(directionKey)) return [];
+        const context = createLineDirectionContext(seed, line);
+        if (!context) return [];
+        seenDirections.add(directionKey);
+        return [context];
+      });
+      return resolvedDirections.slice(0, 2);
+    });
+    const allCandidates = contexts.flatMap((context) => context.candidates);
+    if (contexts.length === 0) {
       return Response.json(
         {
           error: {
@@ -891,19 +1026,17 @@ export async function POST(request: Request) {
         { status: 422 },
       );
     }
-    const candidateLimit = Math.max(
-      4,
-      Math.floor(12 / activeAccessStations.length),
-    );
-    const candidates = selectEvenly(allCandidates, candidateLimit);
-    const networkSpanMeters = Math.max(
-      ...allCandidates.map((station) =>
-        straightLineDistance(validatedAnchor.location, station.location),
-      ),
-    );
+    const networkSpanMeters =
+      allCandidates.length > 0
+        ? Math.max(
+            ...allCandidates.map((station) =>
+              straightLineDistance(validatedAnchor.location, station.location),
+            ),
+          )
+        : 0;
 
     const to = await evaluateDirection(
-      candidates,
+      contexts,
       activeAccessStations,
       departureDate,
       departureTime,
@@ -914,9 +1047,9 @@ export async function POST(request: Request) {
       candidateSource: 'transit_lines',
       budgetMinutes,
       networkSpanMeters,
-      candidateCount: candidates.length,
+      candidateCount: allCandidates.length,
       lineQueryCount: lineSeeds.length,
-      expandedLineCount: expandedLines.length,
+      expandedLineCount: contexts.length,
       routeCheckCount: to.routeCheckCount,
       selectedAccessStationCount: accessStations.length,
       accessStationBudgets: plannedAccessStations.map((station) => ({

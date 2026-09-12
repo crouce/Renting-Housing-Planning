@@ -73,6 +73,13 @@ type ReachableStation = Station & {
   routeLines: string[];
   matchedLines: string[];
   routeGeometry: RouteGeometrySegment[];
+  lineDirection: {
+    id: string;
+    lineName: string;
+    directionLabel: string;
+    startStopName: string;
+    endStopName: string;
+  };
   accessStation: {
     id: string;
     name: string;
@@ -113,6 +120,17 @@ type DirectionReachability = {
     reachableCount: number;
     farthestRouteId: string | null;
     routeIds: string[];
+    directions: Array<{
+      id: string;
+      lineName: string;
+      directionLabel: string;
+      startStopName: string;
+      endStopName: string;
+      candidateCount: number;
+      routeCheckCount: number;
+      status: 'reachable' | 'over_budget' | 'no_route' | 'no_candidate';
+      farthestRouteId: string | null;
+    }>;
   }>;
 };
 
@@ -250,7 +268,7 @@ function commuteMemoryKey(
   selectedLineKeys: string[],
 ) {
   return [
-    'commute:v5',
+    'commute:v6',
     place.location,
     budget,
     departureDate,
@@ -885,7 +903,7 @@ export function CommutePlanner() {
       const routeSegments = routeVisuals(activeStation);
       const representativeRouteIds = new Set(
         (data.directions.to.accessRoutes ?? [])
-          .map((accessRoute) => accessRoute.farthestRouteId)
+          .flatMap((accessRoute) => accessRoute.routeIds)
           .filter((routeId): routeId is string => Boolean(routeId)),
       );
       representativeRouteIds.add(activeStation.logicalId);
@@ -1257,10 +1275,14 @@ export function CommutePlanner() {
         ),
       )
       .filter((station): station is ReachableStation => Boolean(station)),
+    unresolvedDirections: group.directions.filter(
+      (direction) => !direction.farthestRouteId,
+    ),
   }));
-  const overviewRouteCount = accessRouteGroups.filter(
-    (group) => group.farthestRouteId,
-  ).length;
+  const overviewRouteCount = accessRouteGroups.reduce(
+    (count, group) => count + group.routeIds.length,
+    0,
+  );
   const seenLegendLines = new Set<string>();
   const routeLineLegend = routeVisuals(activeRouteStation)
     .filter(({ segment, lineKey }) => {
@@ -1912,7 +1934,8 @@ export function CommutePlanner() {
                   <div>
                     <strong>正在展开接驳站的线路与完整站序</strong>
                     <small>
-                      再按剩余预算核验住所到公司的公交路线，通常需要 8～30 秒。
+                      再按剩余预算核验住所到公司的公共交通路线，通常需要 8～30
+                      秒。
                     </small>
                   </div>
                 </output>
@@ -1991,7 +2014,7 @@ export function CommutePlanner() {
                 {reachability.accessStationBudgets.map((station) => (
                   <span key={station.id}>
                     <strong>{station.name}</strong>
-                    步行 {station.walkingMinutes} 分钟 · 公交预算{' '}
+                    步行 {station.walkingMinutes} 分钟 · 公共交通预算{' '}
                     {station.remainingTransitMinutes} 分钟
                   </span>
                 ))}
@@ -2030,7 +2053,7 @@ export function CommutePlanner() {
                             reachability.directions.to.farthest.accessStation
                               .name
                           }{' '}
-                          · 公交{' '}
+                          · 公共交通{' '}
                           {
                             reachability.directions.to.farthest
                               .transitDurationMinutes
@@ -2085,7 +2108,10 @@ export function CommutePlanner() {
                             <span>司{group.index}</span>
                             {group.accessStationName}
                           </strong>
-                          <small>{group.reachableCount} 条可达路线</small>
+                          <small>
+                            {group.reachableCount} / {group.directions.length}{' '}
+                            个方向可达
+                          </small>
                         </div>
                         {group.routes.length > 0 ? (
                           <div className="reachability-list">
@@ -2121,9 +2147,15 @@ export function CommutePlanner() {
                                     公里
                                   </small>
                                   <small>
-                                    到 {station.accessStation.name} · 公交{' '}
+                                    到 {station.accessStation.name} · 公共交通{' '}
                                     {station.transitDurationMinutes} + 步行{' '}
                                     {station.accessStation.walkingMinutes} 分钟
+                                  </small>
+                                  <small>
+                                    {displayLineName(
+                                      station.lineDirection.lineName,
+                                    )}{' '}
+                                    · {station.lineDirection.directionLabel}
                                   </small>
                                   {station.routeLines.length > 0 && (
                                     <small>
@@ -2143,8 +2175,23 @@ export function CommutePlanner() {
                           </div>
                         ) : (
                           <p className="direction-empty">
-                            当前预算内没有经该接驳站到公司的可达样本
+                            当前预算内没有经该接驳站到公司的可达方向
                           </p>
+                        )}
+                        {group.unresolvedDirections.length > 0 && (
+                          <div className="direction-status-list">
+                            {group.unresolvedDirections.map((direction) => (
+                              <small key={direction.id}>
+                                {displayLineName(direction.lineName)} ·{' '}
+                                {direction.directionLabel}：
+                                {direction.status === 'over_budget'
+                                  ? '超出剩余公交时间'
+                                  : direction.status === 'no_candidate'
+                                    ? '该方向没有上游站点'
+                                    : '高德未返回可用路线'}
+                              </small>
+                            ))}
+                          </div>
                         )}
                       </section>
                     ))}
@@ -2152,7 +2199,7 @@ export function CommutePlanner() {
                 </section>
               </div>
               <p className="sampling-note">
-                每个接驳站分别保留可达路线；地图默认同时显示各站最远路线，点击候选可单独高亮并查看完整途经站。
+                每个接驳站、线路和行驶方向独立计算；先扣除工作地点到接驳站的步行时间，再沿该方向站序查找剩余时间内最远可达站。地图默认显示所有可达方向，点击候选可单独高亮。
               </p>
             </div>
           )}
