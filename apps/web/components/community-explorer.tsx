@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Building2, MapPin, RefreshCw } from 'lucide-react';
+import { MapPin, RefreshCw } from 'lucide-react';
 import { formatDuration } from '@/lib/duration';
 import { mergeCommunities } from '@/lib/community-core';
 import { readCommunityCache, writeCommunityCache } from '@/lib/local-memory';
@@ -367,13 +367,17 @@ export function CommunityExplorer({
   );
 
   return (
-    <section className="community-section" aria-labelledby="community-heading">
+    <section
+      id="commute-communities"
+      className="community-section"
+      aria-labelledby="community-heading"
+    >
       <div className="section-heading">
         <div>
-          <span className="step-kicker">05 · 沿线找小区</span>
-          <h2 id="community-heading">把通勤圈变成居住候选</h2>
+          <h2 id="community-heading" className="workflow-heading">
+            <span>03</span>找小区
+          </h2>
         </div>
-        <Building2 aria-hidden="true" />
       </div>
       <p className="community-hint">
         已核验可达的沿线站点均可选择，不只搜索最远站。每批最多选 3
@@ -544,121 +548,154 @@ export function CommunityExplorer({
                       className={`community-card${activeId === community.id ? ' is-active' : ''}`}
                       key={community.id}
                     >
-                      <div className="community-card-heading">
-                        <h3>{community.name}</h3>
-                        <span
-                          className={`community-status is-${result?.status ?? 'pending'}`}
-                        >
-                          {!result
-                            ? '待核验'
-                            : result.status === 'reachable'
-                              ? '预算内'
-                              : result.status === 'over_budget'
-                                ? '超过预算'
-                                : result.status === 'error'
-                                  ? '接口失败'
-                                  : '方案未匹配'}
-                        </span>
-                      </div>
-                      <p>{community.address || '高德暂无详细地址'}</p>
-                      <small>
-                        距所选站点最近直线{' '}
-                        {Math.round(community.distanceMeters)} 米
-                      </small>
-                      <label className="community-route-choice">
-                        上车站及线路
-                        <select
-                          aria-label={`${community.name}的通勤线路`}
-                          value={seed?.id ?? ''}
-                          disabled={Boolean(busy) || disabled}
-                          onChange={(event) => {
-                            const updated = {
-                              ...choices,
-                              [community.id]: event.target.value,
-                            };
-                            setChoices(updated);
-                            setActiveId(undefined);
-                            save({
-                              communities,
-                              pages,
-                              verifications,
-                              choices: updated,
-                            });
-                            onMapChange({ communities });
-                          }}
-                        >
-                          {community.seedIds.map((id) => {
-                            const option = seedsById.get(id);
-                            return option ? (
-                              <option key={id} value={id}>
-                                {option.station.name} ·{' '}
-                                {option.lineName.split(/[（(]/)[0]} ·{' '}
-                                {option.directionLabel} →{' '}
-                                {option.stops.at(-1)?.name ??
-                                  option.accessStation.name}
-                              </option>
-                            ) : null;
-                          })}
-                        </select>
-                      </label>
-                      {result?.totalSeconds !== undefined && (
-                        <div className="community-breakdown">
-                          <strong>
-                            门到门约 {formatDuration(result.totalSeconds)}
-                          </strong>
-                          {result.homeWalkSeconds !== undefined &&
-                            result.transitSeconds !== undefined &&
-                            result.companyWalkSeconds !== undefined && (
-                              <span>
-                                小区步行{' '}
-                                {formatDuration(result.homeWalkSeconds)} +
-                                公共交通（含候车）
-                                {formatDuration(result.transitSeconds)} +
-                                到公司步行{' '}
-                                {formatDuration(result.companyWalkSeconds)}
-                              </span>
-                            )}
-                          {result.status === 'over_budget' && (
-                            <small>
-                              超出预算{' '}
-                              {formatDuration(
-                                result.totalSeconds - budgetMinutes * 60,
-                              )}
-                            </small>
+                      <details className="community-card-details">
+                        <summary aria-label={`${community.name}的详情`}>
+                          <div className="community-card-heading">
+                            <h3>{community.name}</h3>
+                            <span
+                              className={`community-status is-${result?.status ?? 'pending'}`}
+                            >
+                              {!result
+                                ? '待核验'
+                                : result.status === 'reachable'
+                                  ? '预算内'
+                                  : result.status === 'over_budget'
+                                    ? '超过预算'
+                                    : result.status === 'error'
+                                      ? '接口失败'
+                                      : '方案未匹配'}
+                            </span>
+                          </div>
+                          <div className="community-card-overview">
+                            <strong>
+                              {result?.totalSeconds !== undefined
+                                ? `门到门约 ${formatDuration(result.totalSeconds)}`
+                                : '通勤时间待核验'}
+                            </strong>
+                            <span>
+                              上车站：{seed?.station.name ?? '待选择'}
+                            </span>
+                          </div>
+                          <span className="community-disclosure">
+                            <span className="show-detail-label">查看详情</span>
+                            <span className="hide-detail-label">收起详情</span>
+                          </span>
+                        </summary>
+                        <div className="community-card-detail-body">
+                          <p>{community.address || '高德暂无详细地址'}</p>
+                          <small>
+                            距所选站点最近直线{' '}
+                            {Math.round(community.distanceMeters)} 米
+                          </small>
+                          {community.seedIds.filter((id) => seedsById.has(id))
+                            .length > 1 ? (
+                            <label className="community-route-choice">
+                              上车站及线路
+                              <select
+                                aria-label={`${community.name}的通勤线路`}
+                                value={seed?.id ?? ''}
+                                disabled={Boolean(busy) || disabled}
+                                onChange={(event) => {
+                                  const updated = {
+                                    ...choices,
+                                    [community.id]: event.target.value,
+                                  };
+                                  setChoices(updated);
+                                  setActiveId(undefined);
+                                  save({
+                                    communities,
+                                    pages,
+                                    verifications,
+                                    choices: updated,
+                                  });
+                                  onMapChange({ communities });
+                                }}
+                              >
+                                {community.seedIds.map((id) => {
+                                  const option = seedsById.get(id);
+                                  return option ? (
+                                    <option key={id} value={id}>
+                                      {option.station.name} ·{' '}
+                                      {option.lineName.split(/[（(]/)[0]} ·{' '}
+                                      {option.directionLabel} →{' '}
+                                      {option.stops.at(-1)?.name ??
+                                        option.accessStation.name}
+                                    </option>
+                                  ) : null;
+                                })}
+                              </select>
+                            </label>
+                          ) : (
+                            seed && (
+                              <p className="community-route-label">
+                                {seed.lineName.split(/[（(]/)[0]} ·{' '}
+                                {seed.directionLabel}
+                                <br />到{' '}
+                                {seed.stops.at(-1)?.name ??
+                                  seed.accessStation.name}
+                              </p>
+                            )
                           )}
-                          {result.cached && <small>复用近期核验</small>}
+                          {result?.totalSeconds !== undefined && (
+                            <div className="community-breakdown">
+                              <strong>
+                                门到门约 {formatDuration(result.totalSeconds)}
+                              </strong>
+                              {result.homeWalkSeconds !== undefined &&
+                                result.transitSeconds !== undefined &&
+                                result.companyWalkSeconds !== undefined && (
+                                  <span>
+                                    小区步行{' '}
+                                    {formatDuration(result.homeWalkSeconds)} +
+                                    公共交通（含候车）
+                                    {formatDuration(result.transitSeconds)} +
+                                    到公司步行{' '}
+                                    {formatDuration(result.companyWalkSeconds)}
+                                  </span>
+                                )}
+                              {result.status === 'over_budget' && (
+                                <small>
+                                  超出预算{' '}
+                                  {formatDuration(
+                                    result.totalSeconds - budgetMinutes * 60,
+                                  )}
+                                </small>
+                              )}
+                              {result.cached && <small>复用近期核验</small>}
+                            </div>
+                          )}
+                          {result?.message && (
+                            <p className="community-hint">{result.message}</p>
+                          )}
+                          <div className="community-card-actions">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveId(community.id);
+                                onMapChange({
+                                  communities,
+                                  activeId: community.id,
+                                  verification: result,
+                                });
+                              }}
+                            >
+                              <MapPin size={14} />
+                              {result?.geometry.length
+                                ? '查看完整路线'
+                                : '地图定位'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={Boolean(busy) || disabled}
+                              onClick={() =>
+                                void verify([community], Boolean(result))
+                              }
+                            >
+                              {result ? '重新核验' : '核验通勤'}
+                            </button>
+                          </div>
                         </div>
-                      )}
-                      {result?.message && (
-                        <p className="community-hint">{result.message}</p>
-                      )}
-                      <div className="community-card-actions">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setActiveId(community.id);
-                            onMapChange({
-                              communities,
-                              activeId: community.id,
-                              verification: result,
-                            });
-                          }}
-                        >
-                          <MapPin size={14} />
-                          {result?.geometry.length
-                            ? '查看完整路线'
-                            : '地图定位'}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={Boolean(busy) || disabled}
-                          onClick={() =>
-                            void verify([community], Boolean(result))
-                          }
-                        >
-                          {result ? '重新核验' : '核验通勤'}
-                        </button>
-                      </div>
+                      </details>
                     </article>
                   );
                 })}

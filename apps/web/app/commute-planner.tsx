@@ -20,7 +20,6 @@ import {
   Settings2,
   Sparkles,
   TrainFront,
-  Trophy,
   Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -355,6 +354,9 @@ function loadAMap(jsKey: string, securityCode: string) {
 }
 
 export function CommutePlanner() {
+  const [settingsExpanded, setSettingsExpanded] = useState(true);
+  const resultsHeadingRef = useRef<HTMLHeadingElement>(null);
+  const focusResultsAfterRenderRef = useRef(false);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<AMapMap | null>(null);
   const amapRef = useRef<AMapNamespace | null>(null);
@@ -412,6 +414,18 @@ export function CommutePlanner() {
     stale: boolean;
     fallback: boolean;
   } | null>(null);
+
+  useEffect(() => {
+    if (
+      !settingsExpanded &&
+      reachability &&
+      focusResultsAfterRenderRef.current
+    ) {
+      focusResultsAfterRenderRef.current = false;
+      resultsHeadingRef.current?.focus({ preventScroll: true });
+      resultsHeadingRef.current?.scrollIntoView({ block: 'start' });
+    }
+  }, [settingsExpanded, reachability]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -679,6 +693,8 @@ export function CommutePlanner() {
   }, []);
 
   function resetReachability() {
+    focusResultsAfterRenderRef.current = false;
+    setSettingsExpanded(true);
     calculationRef.current?.abort();
     calculationRef.current = null;
     setRetryingDirectionId(null);
@@ -1185,6 +1201,7 @@ export function CommutePlanner() {
     ) => {
       setReachability(data);
       setReachabilityState('ready');
+      setSettingsExpanded(false);
       setReachabilityError('');
       setCommuteMemory(memory);
       const initialStation =
@@ -1289,6 +1306,7 @@ export function CommutePlanner() {
     );
     if (retryDirectionId && (!previous || !retryGroup || !retryDirection))
       return;
+    focusResultsAfterRenderRef.current = !retryDirectionId;
     calculationRef.current?.abort();
     const controller = new AbortController();
     calculationRef.current = controller;
@@ -1419,6 +1437,8 @@ export function CommutePlanner() {
         error instanceof Error ? error.message : '通勤圈计算失败。',
       );
       setReachabilityState('error');
+      focusResultsAfterRenderRef.current = false;
+      setSettingsExpanded(true);
     } finally {
       if (calculationRef.current === controller) {
         calculationRef.current = null;
@@ -1715,747 +1735,704 @@ export function CommutePlanner() {
         aria-hidden={showOnboarding}
         inert={showOnboarding ? true : undefined}
       >
-        <aside className="control-panel" aria-label="通勤条件">
-          <div className="panel-heading">
-            <span className="step-kicker">01 · 确定工作地点</span>
-            <h1>从通勤时间，反推适合居住的范围</h1>
-            <p>先选择公司或学校，我们会查找附近的公共交通站点。</p>
-          </div>
+        <aside className="control-panel" aria-label="通勤规划">
+          <nav className="planner-steps" aria-label="通勤规划步骤">
+            <a
+              href="#commute-settings"
+              onClick={() => setSettingsExpanded(true)}
+            >
+              <span>01</span>设置条件
+            </a>
+            <a href="#commute-routes">
+              <span>02</span>查看线路
+            </a>
+            <a href="#commute-communities">
+              <span>03</span>找小区
+            </a>
+          </nav>
+          <section id="commute-settings" className="planner-settings">
+            <button
+              type="button"
+              className="settings-summary"
+              aria-expanded={settingsExpanded}
+              aria-controls="commute-settings-content"
+              onClick={() => setSettingsExpanded((value) => !value)}
+            >
+              <span>
+                <strong>设置条件</strong>
+                <small>
+                  {selectedPlace
+                    ? `${selectedPlace.name} · ${budget} 分钟`
+                    : '选择工作地点和通勤预算'}
+                </small>
+                {selectedPlace && (
+                  <small>
+                    {departureDate} {departureTime} · 已选{' '}
+                    {selectedStationIds.length} 个站点
+                  </small>
+                )}
+              </span>
+              <span className="settings-edit">
+                {settingsExpanded ? '收起' : '修改'}
+                <ChevronRight aria-hidden="true" />
+              </span>
+            </button>
+            <div id="commute-settings-content" hidden={!settingsExpanded}>
+              <div className="panel-heading">
+                <h1>设置上班通勤条件</h1>
+              </div>
 
-          <div className="search-block">
-            <label htmlFor="place-search">工作地点</label>
-            <div className="search-input-wrap">
-              <Search aria-hidden="true" />
-              <Input
-                id="place-search"
-                value={query}
-                onChange={(event) => handleQueryChange(event.target.value)}
-                placeholder="搜索公司、园区或学校"
-                autoComplete="off"
-              />
-              {searching && (
-                <span className="search-spinner" aria-label="搜索中" />
-              )}
-            </div>
+              <div className="search-block">
+                <label htmlFor="place-search">工作地点</label>
+                <div className="search-input-wrap">
+                  <Search aria-hidden="true" />
+                  <Input
+                    id="place-search"
+                    value={query}
+                    onChange={(event) => handleQueryChange(event.target.value)}
+                    placeholder="搜索公司、园区或学校"
+                    autoComplete="off"
+                  />
+                  {searching && (
+                    <span className="search-spinner" aria-label="搜索中" />
+                  )}
+                </div>
 
-            {tips.length > 0 && (
-              <div className="suggestion-list" aria-label="地点建议">
-                {tips.map((tip) => (
-                  <button
-                    type="button"
-                    key={tip.id}
-                    onClick={() => selectPlace(tip)}
-                  >
-                    <MapPin aria-hidden="true" />
+                {tips.length > 0 && (
+                  <div className="suggestion-list" aria-label="地点建议">
+                    {tips.map((tip) => (
+                      <button
+                        type="button"
+                        key={tip.id}
+                        onClick={() => selectPlace(tip)}
+                      >
+                        <MapPin aria-hidden="true" />
+                        <span>
+                          <strong>{tip.name}</strong>
+                          <small>
+                            {[tip.district, tip.address]
+                              .filter(Boolean)
+                              .join(' · ')}
+                          </small>
+                        </span>
+                        <ChevronRight aria-hidden="true" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {recentPlaces.length > 0 && (
+                  <div className="recent-place-list" aria-label="最近工作地点">
                     <span>
-                      <strong>{tip.name}</strong>
+                      <History aria-hidden="true" /> 最近使用
+                    </span>
+                    <div>
+                      {recentPlaces.map((place) => (
+                        <button
+                          type="button"
+                          key={`${place.id}:${place.location}`}
+                          onClick={() => selectPlace(place)}
+                          title={place.address || place.district}
+                        >
+                          {place.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {selectedPlace && (
+                <div className="selected-place-card">
+                  <div className="selected-place-icon">
+                    <Building2 aria-hidden="true" />
+                  </div>
+                  <div>
+                    <small>已选择</small>
+                    <strong>{selectedPlace.name}</strong>
+                    <span>{selectedAddress || '地址信息暂缺'}</span>
+                  </div>
+                </div>
+              )}
+
+              <details className="settings-memory-details">
+                <summary>
+                  本机记忆 · {rememberLocally ? '已开启' : '已关闭'}
+                </summary>
+                <div className="local-memory-card">
+                  <div>
+                    <Database aria-hidden="true" />
+                    <span>
+                      <strong>仅在这台设备记住</strong>
                       <small>
-                        {[tip.district, tip.address]
-                          .filter(Boolean)
-                          .join(' · ')}
+                        5 个地点 · 6 组站点 · 4 次通勤 · 3 组小区，不保存密钥
                       </small>
                     </span>
-                    <ChevronRight aria-hidden="true" />
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {recentPlaces.length > 0 && (
-              <div className="recent-place-list" aria-label="最近工作地点">
-                <span>
-                  <History aria-hidden="true" /> 最近使用
-                </span>
-                <div>
-                  {recentPlaces.map((place) => (
                     <button
                       type="button"
-                      key={`${place.id}:${place.location}`}
-                      onClick={() => selectPlace(place)}
-                      title={place.address || place.district}
+                      role="switch"
+                      className="memory-toggle"
+                      aria-checked={rememberLocally}
+                      aria-label="在本机记住工作地点和通勤条件"
+                      onClick={() => setMemoryPreference(!rememberLocally)}
                     >
-                      {place.name}
+                      <span />
                     </button>
+                  </div>
+                  {memoryMessage && <p>{memoryMessage}</p>}
+                  <button
+                    type="button"
+                    disabled={!rememberLocally}
+                    onClick={() => {
+                      skipMemoryWriteRef.current = true;
+                      setMemoryClearNonce((value) => value + 1);
+                      void clearAllLocalMemory();
+                      setRecentPlaces([]);
+                      setStationMemory(null);
+                      setCommuteMemory(null);
+                      setMemoryMessage('已清除本机保存的地点和条件');
+                    }}
+                  >
+                    <Trash2 aria-hidden="true" /> 清除本机记录
+                  </button>
+                </div>
+              </details>
+
+              <div className="condition-section">
+                <div className="section-title-row">
+                  <span className="step-kicker">最长通勤时间</span>
+                  <span className="budget-value">{budget} 分钟</span>
+                </div>
+                <Slider
+                  value={[budget]}
+                  min={20}
+                  max={90}
+                  step={5}
+                  onValueChange={(value) =>
+                    (() => {
+                      setBudget(
+                        typeof value === 'number' ? value : (value[0] ?? 45),
+                      );
+                      resetReachability();
+                    })()
+                  }
+                  aria-label="最长通勤时间"
+                />
+                <div className="slider-labels" aria-hidden="true">
+                  <span>20</span>
+                  <span>45</span>
+                  <span>90 分钟</span>
+                </div>
+
+                <div className="one-way-note">
+                  <ChevronRight aria-hidden="true" />
+                  <span>
+                    <strong>按住所 → 公司核验</strong>
+                    <small>只计算上班方向，减少一半路线检索</small>
+                  </span>
+                </div>
+
+                <div className="date-time-grid">
+                  <label htmlFor="departure-date">
+                    <span>
+                      <CalendarDays /> 出发日期
+                    </span>
+                    <Input
+                      id="departure-date"
+                      type="date"
+                      value={departureDate}
+                      onChange={(event) => {
+                        setDepartureDate(event.target.value);
+                        resetReachability();
+                      }}
+                    />
+                  </label>
+                  <label htmlFor="departure-time">
+                    <span>
+                      <Clock3 /> 出发时间
+                    </span>
+                    <Input
+                      id="departure-time"
+                      type="time"
+                      value={departureTime}
+                      onChange={(event) => {
+                        setDepartureTime(event.target.value);
+                        resetReachability();
+                      }}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="station-range-section">
+                <div>
+                  <span>附近站点范围</span>
+                  <small>建议先从 500 米开始，不够再扩大</small>
+                </div>
+                <div
+                  className="station-range-control"
+                  role="radiogroup"
+                  aria-label="附近站点搜索范围"
+                >
+                  {[
+                    { value: 500, label: '500 米' },
+                    { value: 1000, label: '1 公里' },
+                    { value: 1500, label: '1.5 公里' },
+                  ].map((option) => (
+                    <label key={option.value}>
+                      <input
+                        type="radio"
+                        name="station-radius"
+                        value={option.value}
+                        checked={stationRadius === option.value}
+                        disabled={stationState === 'loading'}
+                        onChange={() => {
+                          setStationRadius(option.value as 500 | 1000 | 1500);
+                          resetNearbyStations();
+                        }}
+                      />
+                      <span>{option.label}</span>
+                    </label>
                   ))}
                 </div>
               </div>
-            )}
-          </div>
-
-          {selectedPlace && (
-            <div className="selected-place-card">
-              <div className="selected-place-icon">
-                <Building2 aria-hidden="true" />
-              </div>
-              <div>
-                <small>已选择</small>
-                <strong>{selectedPlace.name}</strong>
-                <span>{selectedAddress || '地址信息暂缺'}</span>
-              </div>
-            </div>
-          )}
-
-          <div className="local-memory-card">
-            <div>
-              <Database aria-hidden="true" />
-              <span>
-                <strong>仅在这台设备记住</strong>
-                <small>
-                  5 个地点 · 6 组站点 · 4 次通勤 · 3 组小区，不保存密钥
-                </small>
-              </span>
-              <button
-                type="button"
-                role="switch"
-                className="memory-toggle"
-                aria-checked={rememberLocally}
-                aria-label="在本机记住工作地点和通勤条件"
-                onClick={() => setMemoryPreference(!rememberLocally)}
-              >
-                <span />
-              </button>
-            </div>
-            {memoryMessage && <p>{memoryMessage}</p>}
-            <button
-              type="button"
-              disabled={!rememberLocally}
-              onClick={() => {
-                skipMemoryWriteRef.current = true;
-                setMemoryClearNonce((value) => value + 1);
-                void clearAllLocalMemory();
-                setRecentPlaces([]);
-                setStationMemory(null);
-                setCommuteMemory(null);
-                setMemoryMessage('已清除本机保存的地点和条件');
-              }}
-            >
-              <Trash2 aria-hidden="true" /> 清除本机记录
-            </button>
-          </div>
-
-          <div className="condition-section">
-            <div className="section-title-row">
-              <span className="step-kicker">02 · 设置通勤条件</span>
-              <span className="budget-value">{budget} 分钟</span>
-            </div>
-            <Slider
-              value={[budget]}
-              min={20}
-              max={90}
-              step={5}
-              onValueChange={(value) =>
-                (() => {
-                  setBudget(
-                    typeof value === 'number' ? value : (value[0] ?? 45),
-                  );
-                  resetReachability();
-                })()
-              }
-              aria-label="最长通勤时间"
-            />
-            <div className="slider-labels" aria-hidden="true">
-              <span>20</span>
-              <span>45</span>
-              <span>90 分钟</span>
-            </div>
-
-            <div className="one-way-note">
-              <ChevronRight aria-hidden="true" />
-              <span>
-                <strong>按住所 → 公司核验</strong>
-                <small>只计算上班方向，减少一半路线检索</small>
-              </span>
-            </div>
-
-            <div className="date-time-grid">
-              <label htmlFor="departure-date">
-                <span>
-                  <CalendarDays /> 出发日期
-                </span>
-                <Input
-                  id="departure-date"
-                  type="date"
-                  value={departureDate}
-                  onChange={(event) => {
-                    setDepartureDate(event.target.value);
-                    resetReachability();
-                  }}
-                />
-              </label>
-              <label htmlFor="departure-time">
-                <span>
-                  <Clock3 /> 出发时间
-                </span>
-                <Input
-                  id="departure-time"
-                  type="time"
-                  value={departureTime}
-                  onChange={(event) => {
-                    setDepartureTime(event.target.value);
-                    resetReachability();
-                  }}
-                />
-              </label>
-            </div>
-          </div>
-
-          <div className="station-range-section">
-            <div>
-              <span>附近站点范围</span>
-              <small>建议先从 500 米开始，不够再扩大</small>
-            </div>
-            <div
-              className="station-range-control"
-              role="radiogroup"
-              aria-label="附近站点搜索范围"
-            >
-              {[
-                { value: 500, label: '500 米' },
-                { value: 1000, label: '1 公里' },
-                { value: 1500, label: '1.5 公里' },
-              ].map((option) => (
-                <label key={option.value}>
-                  <input
-                    type="radio"
-                    name="station-radius"
-                    value={option.value}
-                    checked={stationRadius === option.value}
-                    disabled={stationState === 'loading'}
-                    onChange={() => {
-                      setStationRadius(option.value as 500 | 1000 | 1500);
-                      resetNearbyStations();
-                    }}
-                  />
-                  <span>{option.label}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <Button
-            size="lg"
-            className="primary-action"
-            disabled={!selectedPlace || stationState === 'loading'}
-            onClick={findStations}
-          >
-            {stationState === 'loading' ? (
-              '正在查找站点…'
-            ) : stationState === 'ready' ? (
-              <>
-                <RefreshCw /> 刷新附近站点
-              </>
-            ) : (
-              <>
-                <LocateFixed /> 查找附近公共交通
-              </>
-            )}
-          </Button>
-
-          {stationState === 'error' && (
-            <p className="inline-error">
-              <CircleAlert />
-              站点查询失败，请稍后重试。
-            </p>
-          )}
-
-          {stationState === 'ready' && (
-            <div className="station-results">
-              <div className="result-heading">
-                <div>
-                  <span className="step-kicker">03 · 附近站点</span>
-                  <strong>
-                    {stationRadius === 500
-                      ? '500 米'
-                      : stationRadius === 1000
-                        ? '1 公里'
-                        : '1.5 公里'}
-                    内找到 {stations.length} 个站点
-                  </strong>
-                </div>
-                <Sparkles aria-hidden="true" />
-              </div>
-              <div className="station-summary">
-                <span>
-                  <TrainFront />
-                  轨道交通 {groupedStations.rail.length}
-                </span>
-                <span>
-                  <BusFront />
-                  公交 {groupedStations.bus.length}
-                </span>
-              </div>
-              {stationMemory && (
-                <div
-                  className={`memory-source-note${stationMemory.stale ? ' is-stale' : ''}`}
-                >
-                  <Database aria-hidden="true" />
-                  <span>
-                    {stationMemory.stale ? '备用的本机记录' : '本机站点记录'} ·{' '}
-                    {memoryAgeLabel(stationMemory.savedAt)}
-                  </span>
-                  {stationMemory.stale && <strong>建议刷新</strong>}
-                </div>
-              )}
-              <div className="station-selection-summary">
-                <strong>已选 {selectedStationIds.length} / 3 个接驳站点</strong>
-                <small>选中线路会限定路线；不选线路表示允许该站全部线路</small>
-              </div>
-              <div className="station-list">
-                {(showAllStations ? stations : stations.slice(0, 6)).map(
-                  (station, index) => {
-                    const isSelected = selectedStationIds.includes(station.id);
-                    const visibleLines = isSelected
-                      ? station.lines
-                      : station.lines.slice(0, 3);
-                    return (
-                      <div
-                        key={station.id}
-                        className={`station-list-row${isSelected ? ' is-selected' : ''}`}
-                      >
-                        <input
-                          type="checkbox"
-                          className="station-select-checkbox"
-                          checked={isSelected}
-                          disabled={
-                            !isSelected && selectedStationIds.length >= 3
-                          }
-                          onChange={(event) =>
-                            setStationSelected(station.id, event.target.checked)
-                          }
-                          aria-label={`${isSelected ? '取消选择' : '选择'}${station.name}`}
-                        />
-                        <button
-                          type="button"
-                          className="station-focus-action"
-                          onClick={() => {
-                            mapRef.current?.setCenter(
-                              parseLocation(station.location),
-                            );
-                            mapRef.current?.setZoom(17);
-                          }}
-                        >
-                          <span
-                            className={`station-mode ${station.mode.toLowerCase()}`}
-                          >
-                            <b>{index + 1}</b>
-                          </span>
-                          <span className="station-detail-copy">
-                            <strong>{station.name}</strong>
-                            <small>直线距离 {station.distanceMeters} 米</small>
-                          </span>
-                          <ChevronRight />
-                        </button>
-                        <div className="station-line-chips is-selectable">
-                          {visibleLines.length > 0 ? (
-                            <>
-                              {visibleLines.map((line) => {
-                                const lineSelected = selectedLineKeys.includes(
-                                  stationLineKey(station.id, line),
-                                );
-                                return (
-                                  <button
-                                    type="button"
-                                    key={line}
-                                    disabled={!isSelected}
-                                    className={
-                                      lineSelected ? 'is-selected' : ''
-                                    }
-                                    aria-pressed={lineSelected}
-                                    onClick={() =>
-                                      toggleStationLine(station.id, line)
-                                    }
-                                  >
-                                    {line}
-                                  </button>
-                                );
-                              })}
-                              {!isSelected && station.lines.length > 3 && (
-                                <span>+{station.lines.length - 3}</span>
-                              )}
-                            </>
-                          ) : (
-                            <span className="is-empty">暂无线路信息</span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  },
-                )}
-              </div>
-              {stations.length > 6 && (
-                <button
-                  type="button"
-                  className="station-list-toggle"
-                  onClick={() => setShowAllStations((visible) => !visible)}
-                >
-                  {showAllStations
-                    ? '收起站点列表'
-                    : `查看全部 ${stations.length} 个站点及线路`}
-                </button>
-              )}
 
               <Button
                 size="lg"
-                className="calculate-action"
-                disabled={
-                  reachabilityState === 'loading' ||
-                  Boolean(retryingDirectionId) ||
-                  selectedStationIds.length === 0
-                }
-                onClick={() => void calculateReachability()}
+                className="primary-action"
+                disabled={!selectedPlace || stationState === 'loading'}
+                onClick={findStations}
               >
-                <Radar />
-                {reachabilityState === 'loading'
-                  ? '正在规划候选路线…'
-                  : selectedStationIds.length === 0
-                    ? '请先选择接驳站点'
-                    : `按 ${selectedStationIds.length} 个站点计算 ${budget} 分钟上班通勤圈`}
+                {stationState === 'loading' ? (
+                  '正在查找站点…'
+                ) : stationState === 'ready' ? (
+                  <>
+                    <RefreshCw /> 刷新附近站点
+                  </>
+                ) : (
+                  <>
+                    <LocateFixed /> 查找附近公共交通
+                  </>
+                )}
               </Button>
 
-              {reachabilityState === 'loading' && (
-                <output className="scan-progress">
-                  <span className="search-spinner" />
-                  <div>
-                    <strong>正在展开接驳站的线路与完整站序</strong>
+              {stationState === 'error' && (
+                <p className="inline-error">
+                  <CircleAlert />
+                  站点查询失败，请稍后重试。
+                </p>
+              )}
+
+              {stationState === 'ready' && (
+                <div className="station-results">
+                  <div className="result-heading">
+                    <div>
+                      <span className="step-kicker">选择公司附近的接驳站</span>
+                      <strong>
+                        {stationRadius === 500
+                          ? '500 米'
+                          : stationRadius === 1000
+                            ? '1 公里'
+                            : '1.5 公里'}
+                        内找到 {stations.length} 个站点
+                      </strong>
+                    </div>
+                    <Sparkles aria-hidden="true" />
+                  </div>
+                  <div className="station-summary">
+                    <span>
+                      <TrainFront />
+                      轨道交通 {groupedStations.rail.length}
+                    </span>
+                    <span>
+                      <BusFront />
+                      公交 {groupedStations.bus.length}
+                    </span>
+                  </div>
+                  {stationMemory && (
+                    <div
+                      className={`memory-source-note${stationMemory.stale ? ' is-stale' : ''}`}
+                    >
+                      <Database aria-hidden="true" />
+                      <span>
+                        {stationMemory.stale
+                          ? '备用的本机记录'
+                          : '本机站点记录'}{' '}
+                        · {memoryAgeLabel(stationMemory.savedAt)}
+                      </span>
+                      {stationMemory.stale && <strong>建议刷新</strong>}
+                    </div>
+                  )}
+                  <div className="station-selection-summary">
+                    <strong>
+                      已选 {selectedStationIds.length} / 3 个接驳站点
+                    </strong>
                     <small>
-                      各方向独立核验；线路较多时需要更长时间，已有核验结果会优先复用。
+                      选中线路会限定路线；不选线路表示允许该站全部线路
                     </small>
                   </div>
-                </output>
-              )}
-
-              {reachabilityState === 'error' && (
-                <p className="inline-error">
-                  <CircleAlert />
-                  {reachabilityError || '通勤圈计算失败，请稍后重试。'}
-                </p>
-              )}
-            </div>
-          )}
-
-          {reachabilityState === 'ready' && reachability && (
-            <div className="reachability-results">
-              <div className="result-heading">
-                <div>
-                  <span className="step-kicker">04 · 通勤圈结果</span>
-                  <strong>
-                    住所到公司可达 {reachability.directions.to.reachableCount}{' '}
-                    条路线
-                  </strong>
-                </div>
-                <Radar aria-hidden="true" />
-              </div>
-
-              {reachabilityError && (
-                <p className="inline-error">
-                  <CircleAlert />
-                  {reachabilityError}
-                </p>
-              )}
-              {reachability.issues.length > 0 && (
-                <div className="calculation-issues">
-                  <strong>以下部分还未完成核验</strong>
-                  {reachability.issues.map((issue) => (
-                    <p key={issue.id}>
-                      {issue.accessStationName}
-                      {issue.lineName ? ` · ${issue.lineName}` : ''}：
-                      {issue.message}
-                    </p>
-                  ))}
-                  <button
-                    type="button"
-                    disabled={Boolean(retryingDirectionId)}
-                    onClick={() =>
-                      void calculateReachability(false, undefined, true)
-                    }
-                  >
-                    重试未完成部分
-                  </button>
-                </div>
-              )}
-              <p className="verification-note">
-                {reachability.cachedDirectionCount > 0 &&
-                  `复用了 ${reachability.cachedDirectionCount} 个方向的核验结果。`}
-                只有完成边界核验的方向才标为“最远站已确认”。
-              </p>
-              {commuteMemory && (
-                <div
-                  className={`memory-source-note commute-memory-note${commuteMemory.stale ? ' is-stale' : ''}`}
-                >
-                  <Database aria-hidden="true" />
-                  <span>
-                    {commuteMemory.fallback
-                      ? '接口失败，已显示上次成功结果'
-                      : commuteMemory.stale
-                        ? '上次保存的通勤结果'
-                        : '本机通勤结果'}{' '}
-                    · {memoryAgeLabel(commuteMemory.savedAt)}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={Boolean(retryingDirectionId)}
-                    onClick={() => void calculateReachability(true)}
-                  >
-                    <RefreshCw aria-hidden="true" /> 更新
-                  </button>
-                </div>
-              )}
-
-              <div className="scan-metrics">
-                <span>
-                  <strong>{reachability.selectedAccessStationCount}</strong>
-                  接驳站点
-                </span>
-                <span>
-                  <strong>{reachability.candidateCount}</strong>候选站点
-                </span>
-                <span>
-                  <strong>{reachability.lineQueryCount}</strong>线路查询
-                </span>
-                <span>
-                  <strong>{reachability.expandedLineCount}</strong>线路方向
-                </span>
-                <span>
-                  <strong>{reachability.routeCheckCount}</strong>路线核验
-                </span>
-                <span>
-                  <strong>
-                    {(reachability.networkSpanMeters / 1000).toFixed(1)} km
-                  </strong>
-                  沿线跨度
-                </span>
-              </div>
-
-              <div className="access-budget-list">
-                {reachability.accessStationBudgets.map((station) => (
-                  <span key={station.id}>
-                    <strong>{station.name}</strong>
-                    步行 {formatDuration(station.walkingDurationSeconds)} ·
-                    公共交通预算{' '}
-                    {formatDuration(station.remainingTransitSeconds)}
-                    {!station.usable && ' · 步行已用完预算'}
-                  </span>
-                ))}
-              </div>
-
-              <div className="direction-results">
-                <section className="direction-result">
-                  <div className="direction-result-heading">
-                    <strong>住所 → 公司</strong>
-                    <span>{accessRouteGroups.length} 个接驳站分别计算</span>
+                  <div className="station-list">
+                    {(showAllStations ? stations : stations.slice(0, 6)).map(
+                      (station, index) => {
+                        const isSelected = selectedStationIds.includes(
+                          station.id,
+                        );
+                        const visibleLines = isSelected
+                          ? station.lines
+                          : station.lines.slice(0, 3);
+                        return (
+                          <div
+                            key={station.id}
+                            className={`station-list-row${isSelected ? ' is-selected' : ''}`}
+                          >
+                            <input
+                              type="checkbox"
+                              className="station-select-checkbox"
+                              checked={isSelected}
+                              disabled={
+                                !isSelected && selectedStationIds.length >= 3
+                              }
+                              onChange={(event) =>
+                                setStationSelected(
+                                  station.id,
+                                  event.target.checked,
+                                )
+                              }
+                              aria-label={`${isSelected ? '取消选择' : '选择'}${station.name}`}
+                            />
+                            <button
+                              type="button"
+                              className="station-focus-action"
+                              onClick={() => {
+                                mapRef.current?.setCenter(
+                                  parseLocation(station.location),
+                                );
+                                mapRef.current?.setZoom(17);
+                              }}
+                            >
+                              <span
+                                className={`station-mode ${station.mode.toLowerCase()}`}
+                              >
+                                <b>{index + 1}</b>
+                              </span>
+                              <span className="station-detail-copy">
+                                <strong>{station.name}</strong>
+                                <small>
+                                  直线距离 {station.distanceMeters} 米
+                                </small>
+                              </span>
+                              <ChevronRight />
+                            </button>
+                            <div className="station-line-chips is-selectable">
+                              {visibleLines.length > 0 ? (
+                                <>
+                                  {visibleLines.map((line) => {
+                                    const lineSelected =
+                                      selectedLineKeys.includes(
+                                        stationLineKey(station.id, line),
+                                      );
+                                    return (
+                                      <button
+                                        type="button"
+                                        key={line}
+                                        disabled={!isSelected}
+                                        className={
+                                          lineSelected ? 'is-selected' : ''
+                                        }
+                                        aria-pressed={lineSelected}
+                                        onClick={() =>
+                                          toggleStationLine(station.id, line)
+                                        }
+                                      >
+                                        {line}
+                                      </button>
+                                    );
+                                  })}
+                                  {!isSelected && station.lines.length > 3 && (
+                                    <span>+{station.lines.length - 3}</span>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="is-empty">暂无线路信息</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      },
+                    )}
                   </div>
-
-                  {reachability.directions.to.farthest ? (
-                    <div className="farthest-card">
-                      <span className="farthest-icon">
-                        <Trophy />
-                      </span>
-                      <div>
-                        <small>已验证结果中距离公司最远</small>
-                        <strong>
-                          {reachability.directions.to.farthest.name}
-                        </strong>
-                        <span>
-                          总计{' '}
-                          {reachability.directions.to.farthest.durationMinutes}{' '}
-                          分钟 · 直线{' '}
-                          {(
-                            reachability.directions.to.farthest
-                              .straightLineMeters / 1000
-                          ).toFixed(1)}{' '}
-                          公里
-                        </span>
-                        <span className="route-access-note">
-                          到{' '}
-                          {
-                            reachability.directions.to.farthest.accessStation
-                              .name
-                          }{' '}
-                          · 公共交通{' '}
-                          {formatDuration(
-                            reachability.directions.to.farthest
-                              .transitDurationSeconds,
-                          )}
-                          {' + 步行 '}
-                          {formatDuration(
-                            reachability.directions.to.farthest
-                              .durationSeconds -
-                              reachability.directions.to.farthest
-                                .transitDurationSeconds,
-                          )}
-                        </span>
-                      </div>
-                    </div>
-                  ) : reachability.directions.to.nearMisses[0] ? (
-                    <div className="farthest-card is-near-miss">
-                      <span className="farthest-icon">
-                        <Clock3 />
-                      </span>
-                      <div>
-                        <small>最接近预算的候选</small>
-                        <strong>
-                          {reachability.directions.to.nearMisses[0].name}
-                        </strong>
-                        <span>
-                          需要{' '}
-                          {
-                            reachability.directions.to.nearMisses[0]
-                              .durationMinutes
-                          }{' '}
-                          分钟，超出预算{' '}
-                          {Math.max(
-                            1,
-                            reachability.directions.to.nearMisses[0]
-                              .durationMinutes - budget,
-                          )}{' '}
-                          分钟
-                        </span>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="direction-empty">暂无有效候选路线</p>
+                  {stations.length > 6 && (
+                    <button
+                      type="button"
+                      className="station-list-toggle"
+                      onClick={() => setShowAllStations((visible) => !visible)}
+                    >
+                      {showAllStations
+                        ? '收起站点列表'
+                        : `查看全部 ${stations.length} 个站点及线路`}
+                    </button>
                   )}
 
-                  <div className="access-route-groups">
-                    {accessRouteGroups.map((group) => (
-                      <section
-                        className="access-route-group"
-                        key={group.accessStationId}
-                      >
-                        <div className="access-route-group-heading">
-                          <strong>
-                            <span>司{group.index}</span>
-                            {group.accessStationName}
-                          </strong>
-                          <small>
-                            {group.reachableCount} / {group.directions.length}{' '}
-                            个方向可达
-                          </small>
-                        </div>
-                        {group.routes.length > 0 ? (
-                          <div className="reachability-list">
-                            {group.routes.map((station, routeIndex) => (
-                              <button
-                                type="button"
-                                key={station.logicalId}
-                                className={
-                                  activeRouteId === station.logicalId
-                                    ? 'is-active'
-                                    : undefined
-                                }
-                                aria-pressed={
-                                  activeRouteId === station.logicalId
-                                }
-                                onClick={() => activateRoute(station)}
-                              >
-                                <span className="result-rank">
-                                  {routeIndex + 1}
-                                </span>
-                                <span>
-                                  <strong>{station.name}</strong>
-                                  <small>
-                                    {station.mode === 'BUS'
-                                      ? '公交站'
-                                      : station.mode === 'LIGHT_RAIL'
-                                        ? '有轨电车 / 轻轨'
-                                        : '地铁站'}{' '}
-                                    · 直线{' '}
-                                    {(
-                                      station.straightLineMeters / 1000
-                                    ).toFixed(1)}{' '}
-                                    公里
-                                  </small>
-                                  <small>
-                                    到 {station.accessStation.name} · 公共交通{' '}
-                                    {formatDuration(
-                                      station.transitDurationSeconds,
-                                    )}{' '}
-                                    + 步行{' '}
-                                    {formatDuration(
-                                      station.durationSeconds -
-                                        station.transitDurationSeconds,
-                                    )}
-                                  </small>
-                                  <small>
-                                    {displayLineName(
-                                      station.lineDirection.lineName,
-                                    )}{' '}
-                                    · {station.lineDirection.directionLabel}
-                                  </small>
-                                  <small>
-                                    {group.directions.find(
-                                      (direction) =>
-                                        direction.id ===
-                                        station.lineDirection.id,
-                                    )?.boundaryConfirmed
-                                      ? '本方向最远站已确认'
-                                      : '已验证可达 · 最远边界待确认'}
-                                  </small>
-                                  {station.routeLines.length > 0 && (
-                                    <small>
-                                      {station.routeLines
-                                        .slice(0, 3)
-                                        .join(' / ')}
-                                    </small>
-                                  )}
-                                </span>
-                                <span className="duration-chip">
-                                  {activeRouteId === station.logicalId
-                                    ? '已高亮'
-                                    : `${station.durationMinutes} 分钟`}
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="direction-empty">
-                            暂无已验证可达路线，请查看下方核验状态。
-                          </p>
-                        )}
-                        {group.directions.map((direction) => (
-                          <DirectionStatusCard
-                            key={direction.id}
-                            direction={direction}
-                            busy={retryingDirectionId === direction.id}
-                            disabled={Boolean(retryingDirectionId)}
-                            onRetry={() =>
-                              void calculateReachability(false, direction.id)
-                            }
-                          />
-                        ))}
-                      </section>
-                    ))}
-                  </div>
-                </section>
-              </div>
-              <p className="sampling-note">
-                各方向使用相同的核验上限，先扣除工作地点到接驳站的步行时间，再核验指定线路的直达方案。达到上限时保留已验证可达站，剩余站点可继续核验；接口失败不会被判为超时。点击路线可在地图上高亮。
-              </p>
-              {selectedPlace && (
-                <CommunityExplorer
-                  key={JSON.stringify([
-                    selectedPlace.id,
-                    budget,
-                    departureDate,
-                    departureTime,
-                    communitySeeds.map((seed) => [
-                      seed.id,
-                      seed.transitSeconds,
-                      seed.companyWalkSeconds,
-                    ]),
-                  ])}
-                  seeds={communitySeeds}
-                  anchor={selectedPlace}
-                  budgetMinutes={budget}
-                  departureDate={departureDate}
-                  departureTime={departureTime}
-                  remember={rememberLocally}
-                  memoryEpoch={memoryClearNonce}
-                  disabled={Boolean(retryingDirectionId)}
-                  onMapChange={drawCommunityMap}
-                />
+                  <Button
+                    size="lg"
+                    className="calculate-action"
+                    disabled={
+                      reachabilityState === 'loading' ||
+                      Boolean(retryingDirectionId) ||
+                      selectedStationIds.length === 0
+                    }
+                    onClick={() => void calculateReachability()}
+                  >
+                    <Radar />
+                    {reachabilityState === 'loading'
+                      ? '正在规划候选路线…'
+                      : selectedStationIds.length === 0
+                        ? '请先选择接驳站点'
+                        : `按 ${selectedStationIds.length} 个站点计算 ${budget} 分钟上班通勤圈`}
+                  </Button>
+
+                  {reachabilityState === 'loading' && (
+                    <output className="scan-progress">
+                      <span className="search-spinner" />
+                      <div>
+                        <strong>正在展开接驳站的线路与完整站序</strong>
+                        <small>
+                          各方向独立核验；线路较多时需要更长时间，已有核验结果会优先复用。
+                        </small>
+                      </div>
+                    </output>
+                  )}
+
+                  {reachabilityState === 'error' && (
+                    <p className="inline-error">
+                      <CircleAlert />
+                      {reachabilityError || '通勤圈计算失败，请稍后重试。'}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
+          </section>
+          <section id="commute-routes" className="planner-route-step">
+            <h2
+              className="workflow-heading"
+              ref={resultsHeadingRef}
+              tabIndex={-1}
+            >
+              <span>02</span>查看线路
+            </h2>
+            {!reachability && (
+              <p className="workflow-empty">
+                {reachabilityState === 'loading'
+                  ? '正在计算各站点与线路方向…'
+                  : '选择附近站点并计算后，在这里比较各方向的可达路线。'}
+              </p>
+            )}
+            {reachabilityState === 'ready' && reachability && (
+              <div className="reachability-results">
+                <div className="result-heading">
+                  <div>
+                    <strong>
+                      住所到公司可达 {reachability.directions.to.reachableCount}{' '}
+                      条路线
+                    </strong>
+                  </div>
+                  <Radar aria-hidden="true" />
+                </div>
+
+                {reachabilityError && (
+                  <p className="inline-error">
+                    <CircleAlert />
+                    {reachabilityError}
+                  </p>
+                )}
+                {reachability.issues.length > 0 && (
+                  <div className="calculation-issues">
+                    <strong>以下部分还未完成核验</strong>
+                    {reachability.issues.map((issue) => (
+                      <p key={issue.id}>
+                        {issue.accessStationName}
+                        {issue.lineName ? ` · ${issue.lineName}` : ''}：
+                        {issue.message}
+                      </p>
+                    ))}
+                    <button
+                      type="button"
+                      disabled={Boolean(retryingDirectionId)}
+                      onClick={() =>
+                        void calculateReachability(false, undefined, true)
+                      }
+                    >
+                      重试未完成部分
+                    </button>
+                  </div>
+                )}
+                {commuteMemory && (
+                  <div
+                    className={`memory-source-note commute-memory-note${commuteMemory.stale ? ' is-stale' : ''}`}
+                  >
+                    <Database aria-hidden="true" />
+                    <span>
+                      {commuteMemory.fallback
+                        ? '接口失败，已显示上次成功结果'
+                        : commuteMemory.stale
+                          ? '上次保存的通勤结果'
+                          : '本机通勤结果'}{' '}
+                      · {memoryAgeLabel(commuteMemory.savedAt)}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={Boolean(retryingDirectionId)}
+                      onClick={() => void calculateReachability(true)}
+                    >
+                      <RefreshCw aria-hidden="true" /> 更新
+                    </button>
+                  </div>
+                )}
+
+                <details className="calculation-details">
+                  <summary>计算概况与步行预算</summary>
+                  <p className="verification-note">
+                    {reachability.cachedDirectionCount > 0 &&
+                      `复用了 ${reachability.cachedDirectionCount} 个方向的核验结果。`}
+                    只有完成边界核验的方向才标为“最远站已确认”。
+                  </p>
+
+                  <div className="scan-metrics">
+                    <span>
+                      <strong>{reachability.selectedAccessStationCount}</strong>
+                      接驳站点
+                    </span>
+                    <span>
+                      <strong>{reachability.candidateCount}</strong>候选站点
+                    </span>
+                    <span>
+                      <strong>{reachability.lineQueryCount}</strong>线路查询
+                    </span>
+                    <span>
+                      <strong>{reachability.expandedLineCount}</strong>线路方向
+                    </span>
+                    <span>
+                      <strong>{reachability.routeCheckCount}</strong>路线核验
+                    </span>
+                    <span>
+                      <strong>
+                        {(reachability.networkSpanMeters / 1000).toFixed(1)} km
+                      </strong>
+                      沿线跨度
+                    </span>
+                  </div>
+
+                  <div className="access-budget-list">
+                    {reachability.accessStationBudgets.map((station) => (
+                      <span key={station.id}>
+                        <strong>{station.name}</strong>
+                        步行 {formatDuration(
+                          station.walkingDurationSeconds,
+                        )} ·
+                        公共交通预算{' '}
+                        {formatDuration(station.remainingTransitSeconds)}
+                        {!station.usable && ' · 步行已用完预算'}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="sampling-note">
+                    各方向独立核验，先扣除公司侧步行时间。未完成的边界可以继续核验；接口失败不会被判为超时。
+                  </p>
+                </details>
+
+                <div className="direction-results">
+                  <section className="direction-result">
+                    <div className="direction-result-heading">
+                      <strong>住所 → 公司</strong>
+                      <span>{accessRouteGroups.length} 个接驳站分别计算</span>
+                    </div>
+
+                    <div className="access-route-groups">
+                      {accessRouteGroups.map((group) => (
+                        <section
+                          className="access-route-group"
+                          key={group.accessStationId}
+                        >
+                          <div className="access-route-group-heading">
+                            <strong>
+                              <span>司{group.index}</span>
+                              {group.accessStationName}
+                            </strong>
+                            <small>
+                              {group.reachableCount} / {group.directions.length}{' '}
+                              个方向可达
+                            </small>
+                          </div>
+                          {group.directions.map((direction) => {
+                            const route = group.routes.find(
+                              (station) =>
+                                station.logicalId === direction.farthestRouteId,
+                            );
+                            return (
+                              <DirectionStatusCard
+                                key={direction.id}
+                                direction={direction}
+                                route={route}
+                                active={Boolean(
+                                  route &&
+                                  activeRouteId === route.logicalId &&
+                                  mapView === 'transit',
+                                )}
+                                onActivate={() => {
+                                  if (route) activateRoute(route);
+                                }}
+                                busy={retryingDirectionId === direction.id}
+                                disabled={Boolean(retryingDirectionId)}
+                                onRetry={() =>
+                                  void calculateReachability(
+                                    false,
+                                    direction.id,
+                                  )
+                                }
+                              />
+                            );
+                          })}
+                        </section>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+              </div>
+            )}
+          </section>
+          {reachabilityState === 'ready' && reachability && selectedPlace ? (
+            <CommunityExplorer
+              key={JSON.stringify([
+                selectedPlace.id,
+                budget,
+                departureDate,
+                departureTime,
+                communitySeeds.map((seed) => [
+                  seed.id,
+                  seed.transitSeconds,
+                  seed.companyWalkSeconds,
+                ]),
+              ])}
+              seeds={communitySeeds}
+              anchor={selectedPlace}
+              budgetMinutes={budget}
+              departureDate={departureDate}
+              departureTime={departureTime}
+              remember={rememberLocally}
+              memoryEpoch={memoryClearNonce}
+              disabled={Boolean(retryingDirectionId)}
+              onMapChange={drawCommunityMap}
+            />
+          ) : (
+            <section id="commute-communities" className="community-section">
+              <h2 className="workflow-heading">
+                <span>03</span>找小区
+              </h2>
+              <p className="workflow-empty">
+                取得可达站点后，可继续搜索沿线小区并核验完整通勤。
+              </p>
+            </section>
           )}
         </aside>
 

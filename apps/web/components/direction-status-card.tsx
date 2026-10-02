@@ -12,21 +12,46 @@ const statusLabels = {
 
 export function DirectionStatusCard({
   direction,
+  route,
+  active,
+  onActivate,
   busy,
   disabled,
   onRetry,
 }: {
   direction: DirectionSummary;
+  route?: {
+    name: string;
+    durationSeconds: number;
+    transitDurationSeconds: number;
+    straightLineMeters: number;
+    routeGeometry: unknown[];
+  };
+  active?: boolean;
+  onActivate?: () => void;
   busy: boolean;
   disabled: boolean;
   onRetry: () => void;
 }) {
   const unresolved = !direction.boundaryConfirmed;
   return (
-    <div className={`direction-status-card${unresolved ? ' is-pending' : ''}`}>
-      <strong>
+    <article
+      className={`direction-status-card direction-route-card${unresolved ? ' is-pending' : ''}${active ? ' is-active' : ''}`}
+    >
+      <h3>
         {direction.lineName.split(/[（(]/)[0]} · {direction.directionLabel}
-      </strong>
+      </h3>
+      {route && (
+        <div className="direction-route-summary">
+          <div>
+            <small>最远已验证站</small>
+            <strong>{route.name}</strong>
+          </div>
+          <strong className="route-total">
+            {formatDuration(route.durationSeconds)}
+          </strong>
+        </div>
+      )}
       <p>
         {statusLabels[direction.status]}
         {direction.status === 'reachable' &&
@@ -34,22 +59,17 @@ export function DirectionStatusCard({
             ? ' · 本方向最远站已确认'
             : ' · 最远边界待确认')}
       </p>
-      {unresolved && (
-        <small>
-          还有 {direction.pendingCount} 个站点待确认
-          {direction.errorCount > 0 &&
-            `，其中 ${direction.errorCount} 个接口失败`}
-          {direction.noRouteCount > 0 &&
-            `，${direction.noRouteCount} 个未返回匹配方案`}
-          。未取得方案不代表不可达。
-        </small>
-      )}
       <div className="direction-status-actions">
-        <span>
-          {direction.cached
-            ? '复用最近核验'
-            : `本次核验 ${direction.routeCheckCount} 次`}
-        </span>
+        {route && (
+          <button
+            type="button"
+            aria-pressed={Boolean(active)}
+            disabled={!route.routeGeometry.length}
+            onClick={onActivate}
+          >
+            {active ? '已在地图高亮' : '查看路线'}
+          </button>
+        )}
         {unresolved && (
           <button type="button" disabled={disabled} onClick={onRetry}>
             {busy
@@ -60,26 +80,51 @@ export function DirectionStatusCard({
           </button>
         )}
       </div>
-      {direction.evidence.length > 0 && (
-        <details className="direction-evidence">
-          <summary>
-            查看 {direction.evidence.length} 个沿线站点的核验记录
-          </summary>
-          <ul>
-            {direction.evidence.map((item, index) => (
-              <li key={`${item.stationName}:${index}`}>
-                <span>{item.stationName}</span>
-                <span>
-                  {statusLabels[item.status]}
-                  {item.durationSeconds !== undefined
-                    ? ` · 公共交通 ${formatDuration(item.durationSeconds)}`
-                    : ''}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-    </div>
+      <details className="direction-evidence">
+        <summary>
+          计算详情
+          {direction.evidence.length > 0
+            ? ` · ${direction.evidence.length} 个站点记录`
+            : ''}
+        </summary>
+        {route && (
+          <p>
+            公共交通 {formatDuration(route.transitDurationSeconds)} + 到公司步行{' '}
+            {formatDuration(
+              route.durationSeconds - route.transitDurationSeconds,
+            )}{' '}
+            · 直线 {(route.straightLineMeters / 1000).toFixed(1)} 公里
+          </p>
+        )}
+        <p>
+          {direction.cached
+            ? '复用最近核验'
+            : `本次核验 ${direction.routeCheckCount} 次`}
+        </p>
+        {unresolved && (
+          <p>
+            还有 {direction.pendingCount} 个站点待确认
+            {direction.errorCount > 0 &&
+              `，其中 ${direction.errorCount} 个接口失败`}
+            {direction.noRouteCount > 0 &&
+              `，${direction.noRouteCount} 个未返回匹配方案`}
+            。未取得方案不代表不可达。
+          </p>
+        )}
+        <ul>
+          {direction.evidence.map((item, index) => (
+            <li key={`${item.stationName}:${index}`}>
+              <span>{item.stationName}</span>
+              <span>
+                {statusLabels[item.status]}
+                {item.durationSeconds !== undefined
+                  ? ` · 公共交通 ${formatDuration(item.durationSeconds)}`
+                  : ''}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </details>
+    </article>
   );
 }

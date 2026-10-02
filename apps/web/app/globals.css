@@ -1656,6 +1656,264 @@ input {
   overflow: hidden;
   background: #dce4df;
 }
+
+/* Three-step planning flow; keep detail available without repeating it. */
+.planner-steps {
+  position: sticky;
+  top: 0;
+  z-index: 15;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 12px 0;
+  margin: -12px 0 18px;
+  background: #fafbf9;
+  border-bottom: 1px solid #dce5df;
+}
+.planner-steps a {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 2px;
+  color: #254c40;
+  border-radius: 8px;
+  text-decoration: none;
+  font-size: 14px;
+}
+.planner-steps::before {
+  content: '';
+  position: absolute;
+  inset: -30px -30px 0;
+  z-index: -1;
+  background: #fafbf9;
+}
+.planner-steps a:hover,
+.planner-steps a:focus-visible {
+  background: #e6f0eb;
+}
+.planner-steps a span {
+  color: #788e83;
+  font-size: 12px;
+}
+.planner-settings,
+.planner-route-step,
+.community-section {
+  scroll-margin-top: 112px;
+}
+.settings-summary {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  padding: 15px;
+  background: #edf4ef;
+  border: 1px solid #d4e3d9;
+  border-radius: 12px;
+  color: #173f32;
+}
+.settings-summary > span:first-child {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.settings-summary strong {
+  font-size: 16px;
+}
+.settings-summary small {
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.settings-edit {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  font-size: 14px;
+}
+.settings-edit svg {
+  width: 16px;
+  height: 16px;
+}
+.settings-summary[aria-expanded='true'] .settings-edit svg {
+  transform: rotate(90deg);
+}
+#commute-settings-content .panel-heading {
+  margin-top: 20px;
+}
+#commute-settings-content .panel-heading h1 {
+  font-size: 18px;
+  line-height: 1.5;
+}
+.settings-memory-details {
+  margin-top: 16px;
+  font-size: 14px;
+  color: #516d60;
+}
+.settings-memory-details summary,
+.calculation-details summary {
+  cursor: pointer;
+  padding: 10px 0;
+}
+.settings-memory-details .local-memory-card {
+  margin-top: 4px;
+}
+.workflow-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 24px 0 14px;
+  font-size: 18px;
+  font-weight: 650;
+  scroll-margin-top: 112px;
+}
+.workflow-heading > span {
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  border-radius: 8px;
+  background: #e7efeb;
+  color: #315d4c;
+  font-size: 12px;
+}
+.workflow-empty {
+  padding: 16px;
+  border: 1px dashed #ccd9d1;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #60766a;
+}
+.planner-route-step .reachability-results {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 0;
+}
+.calculation-details {
+  margin: 12px 0;
+  border-bottom: 1px solid #e0e8e2;
+  font-size: 14px;
+  color: #546d61;
+}
+.direction-route-card h3 {
+  font-size: 15px;
+  line-height: 1.6;
+  font-weight: 650;
+  margin: 0;
+  color: #214c3d;
+}
+.direction-route-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 12px;
+  margin-top: 12px;
+}
+.direction-route-summary > div {
+  display: grid;
+  gap: 4px;
+}
+.direction-route-summary small {
+  font-size: 12px;
+  color: #6d8076;
+}
+.direction-route-summary strong {
+  font-size: 16px;
+  line-height: 1.5;
+}
+.direction-route-summary .route-total {
+  flex-shrink: 0;
+  font-size: 14px;
+  color: #1c6f56;
+}
+.direction-route-card.is-active {
+  box-shadow: inset 3px 0 #17755c;
+  border-color: #4d9c80;
+  background: #f1f8f3;
+}
+.direction-route-card > p {
+  font-size: 14px;
+  line-height: 1.6;
+}
+.direction-route-card .direction-status-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
+}
+.direction-route-card button,
+.direction-route-card .direction-evidence summary {
+  font-size: 14px;
+}
+.direction-route-card .direction-evidence p,
+.direction-route-card .direction-evidence li {
+  font-size: 13px;
+  line-height: 1.65;
+}
+.community-section .workflow-heading {
+  margin-top: 0;
+}
+.community-card:has(.community-card-details) {
+  padding: 0;
+}
+.community-card-details > summary {
+  list-style: none;
+  padding: 16px;
+  cursor: pointer;
+}
+.community-card-details > summary::-webkit-details-marker {
+  display: none;
+}
+.community-card-details > summary:focus-visible {
+  outline: 2px solid #187e64;
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+.community-card-overview {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+.community-card-overview strong {
+  color: #1b614b;
+  font-size: 16px;
+}
+.community-card-overview > span {
+  color: #576f63;
+  font-size: 14px;
+}
+.community-disclosure {
+  display: block;
+  margin-top: 12px;
+  color: #537664;
+  font-size: 13px;
+}
+.hide-detail-label,
+.community-card-details[open] .show-detail-label {
+  display: none;
+}
+.community-card-details[open] .hide-detail-label {
+  display: inline;
+}
+.community-card-detail-body {
+  padding: 0 16px 16px;
+  border-top: 1px solid #e2ebe5;
+}
+.community-card-detail-body > p {
+  margin-top: 12px;
+}
+.community-route-label {
+  color: #3b6150;
+  font-size: 14px;
+  line-height: 1.6;
+}
+@media (max-width: 820px) {
+  .planner-steps {
+    top: 0;
+  }
+}
 .map-canvas {
   position: absolute;
   inset: 0;
