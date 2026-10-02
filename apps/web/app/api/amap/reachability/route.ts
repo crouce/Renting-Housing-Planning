@@ -1,8 +1,25 @@
-import { amapErrorResponse, amapRequest } from '@/lib/amap-server';
+import {
+  AMapServerError,
+  amapErrorResponse,
+  amapRequest,
+} from '@/lib/amap-server';
+import {
+  BoundedCache,
+  matchesDirectLine,
+  normalizeLineName,
+  searchDirection,
+  type Observation,
+} from '@/lib/reachability-core';
+import type {
+  CalculationIssue,
+  DirectionSummary,
+} from '@/lib/reachability-types';
 
 type TransitMode = 'BUS' | 'SUBWAY' | 'LIGHT_RAIL';
 
 type ReachabilityRequest = {
+  refresh?: boolean;
+  retryDirectionId?: string;
   anchor?: {
     id?: string;
     name?: string;
@@ -70,6 +87,8 @@ type TransitResponse = {
     transits?: Array<{
       cost?: { duration?: string };
       segments?: Array<{
+        railway?: unknown;
+        taxi?: unknown;
         walking?: {
           steps?: Array<{ polyline?: unknown }>;
         };
@@ -108,6 +127,7 @@ type WalkingResponse = {
 };
 
 type CandidateStation = {
+  stopIndex: number;
   id: string;
   logicalId: string;
   name: string;
@@ -130,6 +150,7 @@ type LineDirectionContext = {
   accessStation: AccessStationWithWalk;
   requestedLineName: string;
   line: AMapBusLine;
+  accessStopIndex: number;
   directionLabel: string;
   candidates: CandidateStation[];
 };
@@ -180,7 +201,9 @@ type AccessStationBudget = {
   name: string;
   walkingDistanceMeters: number;
   walkingMinutes: number;
+  walkingDurationSeconds: number;
   remainingTransitMinutes: number;
+  remainingTransitSeconds: number;
   usable: boolean;
 };
 
@@ -200,17 +223,7 @@ type DirectionReachability = {
     reachableCount: number;
     farthestRouteId: string | null;
     routeIds: string[];
-    directions: Array<{
-      id: string;
-      lineName: string;
-      directionLabel: string;
-      startStopName: string;
-      endStopName: string;
-      candidateCount: number;
-      routeCheckCount: number;
-      status: 'reachable' | 'over_budget' | 'no_route' | 'no_candidate';
-      farthestRouteId: string | null;
-    }>;
+    directions: DirectionSummary[];
   }>;
 };
 
@@ -224,18 +237,40 @@ type ReachabilityResult = {
   expandedLineCount: number;
   routeCheckCount: number;
   selectedAccessStationCount: number;
+  partial: boolean;
+  issues: CalculationIssue[];
+  cachedDirectionCount: number;
   accessStationBudgets: AccessStationBudget[];
   directions: {
     to: DirectionReachability;
   };
 };
 
-type CacheEntry = { expiresAt: number; value: ReachabilityResult };
-
 const locationPattern = /^-?\d{1,3}(?:\.\d{1,6})?,-?\d{1,2}(?:\.\d{1,6})?$/;
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
-const cache = new Map<string, CacheEntry>();
+const walkingCache = new BoundedCache<AccessStationWithWalk>(64, 256_000);
+const lineCache = new BoundedCache<AMapBusLine[]>(48, 2 * 1024 * 1024);
+type DirectionEvaluation = {
+  context: LineDirectionContext;
+  observations: Observation<ReachableStation>[];
+  best: ReachableStation | null;
+  summary: DirectionSummary;
+};
+const directionCache = new BoundedCache<Omit<DirectionEvaluation, 'context'>>(
+  48,
+);
+const pendingDirections = new Map<
+  string,
+  Promise<Omit<DirectionEvaluation, 'context'>>
+>();
+let nextRequestAt = 0;
+async function paceRequest() {
+  const now = Date.now();
+  const wait = Math.max(0, nextRequestAt - now);
+  nextRequestAt = Math.max(now, nextRequestAt) + 350;
+  if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+}
 
 function parseLocation(location: string): [number, number] {
   const [longitude, latitude] = location.split(',').map(Number);
@@ -265,14 +300,6 @@ function straightLineDistance(from: string, to: string) {
   );
 }
 
-function normalizeLineName(line: string) {
-  return line
-    .split('(')[0]
-    .replaceAll(/地铁|轨道交通|轨交/g, '')
-    .replaceAll(/\s/g, '')
-    .toLowerCase();
-}
-
 function lineMode(line: AMapBusLine): TransitMode {
   return transitMode(`${line.type ?? ''} ${line.name ?? ''}`);
 }
@@ -281,22 +308,6 @@ function transitMode(description: string): TransitMode {
   if (/有轨电车|轻轨/.test(description)) return 'LIGHT_RAIL';
   if (/地铁|轨道交通/.test(description)) return 'SUBWAY';
   return 'BUS';
-}
-
-function routeMatchesAllowedLines(
-  routeLines: string[],
-  allowedLines: string[],
-) {
-  if (allowedLines.length === 0) return true;
-  const normalizedRouteLines = routeLines.map(normalizeLineName);
-  return allowedLines.some((allowedLine) => {
-    const normalizedAllowedLine = normalizeLineName(allowedLine);
-    return normalizedRouteLines.some(
-      (routeLine) =>
-        routeLine.includes(normalizedAllowedLine) ||
-        normalizedAllowedLine.includes(routeLine),
-    );
-  });
 }
 
 function polylineText(value: unknown): string {
@@ -375,11 +386,19 @@ function collectRouteGeometry(
   return geometry;
 }
 
-async function expandTransitLine(lineName: string, citycode: string) {
+async function expandTransitLine(
+  lineName: string,
+  citycode: string,
+  refresh = false,
+) {
+  const key = `${citycode}:${normalizeLineName(lineName)}`;
+  const cached = refresh ? undefined : lineCache.get(key);
+  if (cached) return cached;
+  await paceRequest();
   const result = await amapRequest<BusLineResponse>(
     '/v3/bus/linename',
     new URLSearchParams({
-      keywords: lineName.split('(')[0].trim(),
+      keywords: lineName.split(/[（(]/)[0].trim(),
       city: citycode,
       extensions: 'all',
       offset: '20',
@@ -388,13 +407,15 @@ async function expandTransitLine(lineName: string, citycode: string) {
   );
 
   const normalizedRequestedName = normalizeLineName(lineName);
-  return (result.buslines ?? []).filter(
+  const lines = (result.buslines ?? []).filter(
     (line) =>
       line.id &&
       line.name &&
       normalizeLineName(line.name) === normalizedRequestedName &&
       Array.isArray(line.busstops),
   );
+  if (lines.length) lineCache.set(key, lines, 24 * 60 * 60_000);
+  return lines;
 }
 
 function nearestLineStopIndex(
@@ -437,18 +458,18 @@ function createLineDirectionContext(
   const id = `${seed.accessStation.id}::${line.id}`;
   const candidates = (line.busstops ?? [])
     .slice(0, accessStopIndex)
-    .flatMap((stop) => {
+    .flatMap((stop, stopIndex) => {
       if (
         !stop.id ||
         !stop.name ||
         !stop.location ||
-        !locationPattern.test(stop.location) ||
-        straightLineDistance(seed.accessStation.location, stop.location) < 250
+        !locationPattern.test(stop.location)
       ) {
         return [];
       }
       return [
         {
+          stopIndex,
           id: stop.id,
           logicalId: `${id}::${stop.id}`,
           name: stop.name,
@@ -468,38 +489,26 @@ function createLineDirectionContext(
     accessStation: seed.accessStation,
     requestedLineName: seed.lineName,
     line,
+    accessStopIndex,
     directionLabel,
     candidates,
   };
 }
 
-function selectLineSeedsFairly(
-  accessStations: AccessStationWithWalk[],
-  limit: number,
-) {
-  const queues = accessStations.map((accessStation) => ({
-    accessStation,
-    lineNames:
-      accessStation.allowedLines.length > 0
-        ? accessStation.allowedLines
-        : accessStation.availableLines,
-  }));
-  const seeds: AccessLineSeed[] = [];
-  for (let lineIndex = 0; seeds.length < limit; lineIndex += 1) {
-    let added = false;
-    for (const queue of queues) {
-      const lineName = queue.lineNames[lineIndex];
-      if (!lineName || seeds.length >= limit) continue;
-      seeds.push({
-        accessStation: queue.accessStation,
-        lineName,
-        citycode: queue.accessStation.citycode,
-      });
-      added = true;
-    }
-    if (!added) break;
-  }
-  return seeds;
+function selectLineSeeds(accessStations: AccessStationWithWalk[]) {
+  return accessStations.flatMap((accessStation) => {
+    const names = accessStation.allowedLines.length
+      ? accessStation.allowedLines
+      : accessStation.availableLines;
+    const unique = new Map(
+      names.map((name) => [normalizeLineName(name), name]),
+    );
+    return [...unique.values()].sort().map((lineName) => ({
+      accessStation,
+      lineName,
+      citycode: accessStation.citycode,
+    }));
+  });
 }
 
 async function runThrottled<T, R>(
@@ -521,7 +530,24 @@ async function planWalking(
   anchor: NonNullable<ReachabilityRequest['anchor']>,
   accessStation: AccessStation,
   budgetSeconds: number,
-): Promise<AccessStationWithWalk | null> {
+  refresh = false,
+): Promise<AccessStationWithWalk> {
+  const key = JSON.stringify([
+    anchor.id,
+    anchor.location,
+    accessStation.id,
+    accessStation.location,
+  ]);
+  const cached = refresh ? undefined : walkingCache.get(key);
+  if (cached)
+    return {
+      ...cached,
+      ...accessStation,
+      remainingTransitSeconds: Math.max(
+        0,
+        budgetSeconds - cached.walkingDurationSeconds,
+      ),
+    };
   const params = new URLSearchParams({
     origin: anchor.location!,
     destination: accessStation.location,
@@ -531,7 +557,8 @@ async function planWalking(
     show_fields: 'cost',
   });
 
-  try {
+  await paceRequest();
+  {
     const result = await amapRequest<WalkingResponse>(
       '/v5/direction/walking',
       params,
@@ -550,9 +577,14 @@ async function planWalking(
       )
       .sort((left, right) => left.durationSeconds - right.durationSeconds);
     const best = paths[0];
-    if (!best) return null;
+    if (!best)
+      throw new AMapServerError(
+        '未取得接驳步行路线。',
+        'NO_WALKING_ROUTE',
+        422,
+      );
 
-    return {
+    const plan = {
       ...accessStation,
       walkingDistanceMeters: Math.round(best.distanceMeters),
       walkingDurationSeconds: Math.ceil(best.durationSeconds),
@@ -561,27 +593,19 @@ async function planWalking(
         budgetSeconds - Math.ceil(best.durationSeconds),
       ),
     };
-  } catch {
-    return null;
+    walkingCache.set(key, plan, 10 * 60_000);
+    return plan;
   }
 }
 
-async function planTransit(
+async function checkTransit(
   station: CandidateStation,
-  accessStation: AccessStationWithWalk,
+  context: LineDirectionContext,
   departureDate: string,
   departureTime: string,
-): Promise<{
-  transitDurationSeconds: number;
-  durationSeconds: number;
-  segmentCount: number;
-  routeLines: string[];
-  matchedLines: string[];
-  routeGeometry: RouteGeometrySegment[];
-  accessStation: ReachableStation['accessStation'];
-} | null> {
-  if (!station.citycode || !accessStation.citycode) return null;
-
+  anchorLocation: string,
+): Promise<Omit<Observation<ReachableStation>, 'index'>> {
+  const accessStation = context.accessStation;
   const params = new URLSearchParams({
     origin: station.location,
     destination: accessStation.location,
@@ -595,36 +619,73 @@ async function planTransit(
     time: departureTime.replace(':', '-'),
     show_fields: 'cost,polyline',
   });
-
   try {
+    await paceRequest();
     const result = await amapRequest<TransitResponse>(
       '/v5/direction/transit/integrated',
       params,
       { retries: 0, timeoutMilliseconds: 8_000 },
     );
     const routes = (result.route?.transits ?? [])
-      .map((route) => {
-        const routeLines = [
-          ...new Set(
-            (route.segments ?? []).flatMap((segment) =>
-              (segment.bus?.buslines ?? [])
-                .map((busline) => busline.name?.trim() ?? '')
-                .filter(Boolean),
-            ),
-          ),
-        ];
-        const matchedLines = accessStation.allowedLines.filter((allowedLine) =>
-          routeMatchesAllowedLines(routeLines, [allowedLine]),
+      .flatMap((route) => {
+        const segments = route.segments ?? [];
+        const busSegments = segments.filter(
+          (segment) => (segment.bus?.buslines?.length ?? 0) > 0,
         );
-        return {
-          transitDurationSeconds: Number(route.cost?.duration ?? 0),
-          durationSeconds:
-            Number(route.cost?.duration ?? 0) +
-            accessStation.walkingDurationSeconds,
-          segmentCount: route.segments?.length ?? 0,
-          routeLines,
-          matchedLines,
-          routeGeometry: collectRouteGeometry(route.segments),
+        // A line direction denotes one direct ride; transfers are a different product.
+        if (
+          busSegments.length !== 1 ||
+          segments.some((segment) =>
+            [segment.railway, segment.taxi].some(
+              (value) =>
+                value &&
+                typeof value === 'object' &&
+                Object.keys(value).length > 0,
+            ),
+          )
+        )
+          return [];
+        const busline = busSegments[0].bus!.buslines!.find((line) =>
+          matchesDirectLine(line, {
+            id: context.line.id!,
+            name: context.line.name!,
+            stops: context.line.busstops ?? [],
+            boardIndex: station.stopIndex,
+            alightIndex: context.accessStopIndex,
+          }),
+        );
+        if (!busline) return [];
+        const seconds = Number(route.cost?.duration);
+        if (!Number.isFinite(seconds) || seconds <= 0) return [];
+        const chosenSegments = segments.map((segment) =>
+          segment === busSegments[0]
+            ? { ...segment, bus: { buslines: [busline] } }
+            : segment,
+        );
+        const reachable = seconds <= accessStation.remainingTransitSeconds;
+        const planned: ReachableStation = {
+          ...station,
+          transitDurationSeconds: seconds,
+          transitDurationMinutes: Math.ceil(seconds / 60),
+          durationSeconds: seconds + accessStation.walkingDurationSeconds,
+          durationMinutes: Math.ceil(
+            (seconds + accessStation.walkingDurationSeconds) / 60,
+          ),
+          straightLineMeters: straightLineDistance(
+            anchorLocation,
+            station.location,
+          ),
+          segmentCount: 1,
+          routeLines: [busline.name!],
+          matchedLines: [context.requestedLineName],
+          routeGeometry: reachable ? collectRouteGeometry(chosenSegments) : [],
+          lineDirection: {
+            id: context.id,
+            lineName: context.requestedLineName,
+            directionLabel: context.directionLabel,
+            startStopName: context.line.start_stop ?? '',
+            endStopName: context.line.end_stop ?? '',
+          },
           accessStation: {
             id: accessStation.id,
             name: accessStation.name,
@@ -638,20 +699,138 @@ async function planTransit(
             ),
           },
         };
+        return [planned];
       })
-      .filter(
-        (route) =>
-          route.transitDurationSeconds > 0 &&
-          routeMatchesAllowedLines(
-            route.routeLines,
-            accessStation.allowedLines,
-          ),
-      )
-      .sort((left, right) => left.durationSeconds - right.durationSeconds);
+      .sort((a, b) => a.transitDurationSeconds - b.transitDurationSeconds);
+    const route = routes[0];
+    if (!route)
+      return { status: 'no_route', errorCode: 'NO_MATCHING_DIRECT_ROUTE' };
+    return {
+      status:
+        route.transitDurationSeconds <= accessStation.remainingTransitSeconds
+          ? 'reachable'
+          : 'over_budget',
+      durationSeconds: route.transitDurationSeconds,
+      route:
+        route.transitDurationSeconds <= accessStation.remainingTransitSeconds
+          ? route
+          : undefined,
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      errorCode:
+        error instanceof AMapServerError
+          ? error.code
+          : 'AMAP_UPSTREAM_UNAVAILABLE',
+    };
+  }
+}
 
-    return routes[0] ?? null;
-  } catch {
-    return null;
+async function evaluateLineDirection(
+  context: LineDirectionContext,
+  departureDate: string,
+  departureTime: string,
+  anchorLocation: string,
+  refresh: boolean,
+  resume: boolean,
+): Promise<DirectionEvaluation> {
+  const key = JSON.stringify([
+    'verified-directions-v1',
+    anchorLocation,
+    context.id,
+    context.requestedLineName,
+    context.accessStation.location,
+    context.accessStation.citycode,
+    context.accessStation.walkingDurationSeconds,
+    context.accessStation.remainingTransitSeconds,
+    departureDate,
+    departureTime,
+    context.accessStopIndex,
+    context.line.name,
+    context.line.busstops,
+  ]);
+  const cached = refresh ? undefined : directionCache.get(key);
+  if (cached && !resume)
+    return {
+      ...cached,
+      context,
+      summary: { ...cached.summary, cached: true, routeCheckCount: 0 },
+    };
+  const pending = pendingDirections.get(key);
+  if (pending) {
+    const value = await pending;
+    return {
+      ...value,
+      context,
+      summary: { ...value.summary, cached: true, routeCheckCount: 0 },
+    };
+  }
+  const calculate = async (): Promise<Omit<DirectionEvaluation, 'context'>> => {
+    const searched = await searchDirection<ReachableStation>({
+      count: context.candidates.length,
+      previous: cached?.observations,
+      check: (index) =>
+        checkTransit(
+          context.candidates[index],
+          context,
+          departureDate,
+          departureTime,
+          anchorLocation,
+        ),
+    });
+    const best = searched.best?.route ?? null;
+    // Retain only the best route's geometry; all other checkpoints need just timing/status.
+    const observations = searched.observations.map((item) => ({
+      ...item,
+      route: item.index === searched.best?.index ? item.route : undefined,
+    }));
+    const relevant = observations.filter((item) =>
+      searched.unresolved.includes(item.index),
+    );
+    const summary: DirectionSummary = {
+      id: context.id,
+      lineName: context.requestedLineName,
+      directionLabel: context.directionLabel,
+      startStopName: context.line.start_stop ?? '',
+      endStopName: context.line.end_stop ?? '',
+      candidateCount: context.candidates.length,
+      routeCheckCount: searched.calls,
+      checkedCount: observations.filter(
+        (item) => item.status === 'reachable' || item.status === 'over_budget',
+      ).length,
+      status: searched.status,
+      boundaryConfirmed: searched.confirmed,
+      pendingCount: searched.unresolved.length,
+      errorCount: relevant.filter((item) => item.status === 'error').length,
+      noRouteCount: relevant.filter((item) => item.status === 'no_route')
+        .length,
+      cached: false,
+      farthestRouteId: best?.logicalId ?? null,
+      evidence: context.candidates.map((candidate, index) => {
+        const checked = observations.find((item) => item.index === index);
+        return {
+          stationName: candidate.name,
+          status: checked?.status ?? 'unverified',
+          durationMinutes:
+            checked?.durationSeconds === undefined
+              ? undefined
+              : Math.ceil(checked.durationSeconds / 60),
+          durationSeconds: checked?.durationSeconds,
+          errorCode: checked?.errorCode,
+        };
+      }),
+    };
+    const value = { observations, best, summary };
+    directionCache.set(key, value, 10 * 60_000);
+    return value;
+  };
+  const task = calculate();
+  pendingDirections.set(key, task);
+  try {
+    return { ...(await task), context };
+  } finally {
+    pendingDirections.delete(key);
   }
 }
 
@@ -661,183 +840,64 @@ async function evaluateDirection(
   departureDate: string,
   departureTime: string,
   anchorLocation: string,
+  refresh: boolean,
+  resume: boolean,
+  signal: AbortSignal,
 ): Promise<DirectionReachability> {
-  const maxChecksPerDirection =
-    contexts.length <= 6 ? 4 : contexts.length <= 12 ? 3 : 2;
-  const evaluations: Array<{
-    context: LineDirectionContext;
-    routeCheckCount: number;
-    failedCount: number;
-    successful: ReachableStation[];
-    best: ReachableStation | null;
-  }> = [];
-
+  const evaluations: DirectionEvaluation[] = [];
   for (const context of contexts) {
-    let routeCheckCount = 0;
-    let failedCount = 0;
-    const successful: ReachableStation[] = [];
-    let best: ReachableStation | null = null;
-    const restrictedAccessStation = {
-      ...context.accessStation,
-      allowedLines: [context.requestedLineName],
-    };
-    const evaluateCandidate = async (candidateIndex: number) => {
-      const station = context.candidates[candidateIndex];
-      routeCheckCount += 1;
-      const route = await planTransit(
-        station,
-        restrictedAccessStation,
+    signal.throwIfAborted();
+    evaluations.push(
+      await evaluateLineDirection(
+        context,
         departureDate,
         departureTime,
-      );
-      if (!route) {
-        failedCount += 1;
-        return null;
-      }
-      const evaluated: ReachableStation = {
-        ...station,
-        logicalId: `${station.logicalId}::result`,
-        transitDurationSeconds: route.transitDurationSeconds,
-        transitDurationMinutes: Math.ceil(route.transitDurationSeconds / 60),
-        durationSeconds: route.durationSeconds,
-        durationMinutes: Math.ceil(route.durationSeconds / 60),
-        straightLineMeters: straightLineDistance(
-          anchorLocation,
-          station.location,
-        ),
-        segmentCount: route.segmentCount,
-        routeLines: route.routeLines,
-        matchedLines: route.matchedLines,
-        routeGeometry: route.routeGeometry,
-        lineDirection: {
-          id: context.id,
-          lineName: context.requestedLineName,
-          directionLabel: context.directionLabel,
-          startStopName: context.line.start_stop ?? '',
-          endStopName: context.line.end_stop ?? '',
-        },
-        accessStation: route.accessStation,
-      };
-      successful.push(evaluated);
-      return evaluated;
-    };
-
-    if (context.candidates.length > 0) {
-      let low = 0;
-      let high = context.candidates.length - 1;
-      const endpoint = await evaluateCandidate(high);
-      if (
-        endpoint &&
-        endpoint.transitDurationSeconds <=
-          endpoint.accessStation.remainingTransitSeconds
-      ) {
-        best = endpoint;
-      } else {
-        high -= 1;
-        while (low <= high && routeCheckCount < maxChecksPerDirection) {
-          const middle = Math.ceil((low + high) / 2);
-          const evaluated = await evaluateCandidate(middle);
-          if (
-            evaluated &&
-            evaluated.transitDurationSeconds <=
-              evaluated.accessStation.remainingTransitSeconds
-          ) {
-            best = evaluated;
-            low = middle + 1;
-          } else {
-            high = middle - 1;
-          }
-          if (routeCheckCount < maxChecksPerDirection) {
-            await new Promise((resolve) => setTimeout(resolve, 350));
-          }
-        }
-      }
-    }
-    evaluations.push({
-      context,
-      routeCheckCount,
-      failedCount,
-      successful,
-      best,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 350));
+        anchorLocation,
+        refresh,
+        resume,
+      ),
+    );
   }
-
   const reachable = evaluations
-    .flatMap((evaluation) => (evaluation.best ? [evaluation.best] : []))
-    .sort((left, right) => right.straightLineMeters - left.straightLineMeters);
-  const allSuccessful = evaluations.flatMap(
-    (evaluation) => evaluation.successful,
-  );
-  const nearMisses = allSuccessful
-    .filter(
-      (station) =>
-        station.transitDurationSeconds >
-        station.accessStation.remainingTransitSeconds,
-    )
-    .sort((left, right) => left.durationSeconds - right.durationSeconds)
-    .slice(0, 3);
-  const farthest = reachable[0] ?? null;
-  const accessRoutes = activeAccessStations.map((accessStation) => {
-    const routes = reachable.filter(
-      (station) => station.accessStation.id === accessStation.id,
-    );
-    const directionEvaluations = evaluations.filter(
-      (evaluation) => evaluation.context.accessStation.id === accessStation.id,
-    );
-    return {
-      accessStationId: accessStation.id,
-      accessStationName: accessStation.name,
-      reachableCount: routes.length,
-      farthestRouteId: routes[0]?.logicalId ?? null,
-      routeIds: routes.map((station) => station.logicalId),
-      directions: directionEvaluations.map((evaluation) => ({
-        id: evaluation.context.id,
-        lineName: evaluation.context.requestedLineName,
-        directionLabel: evaluation.context.directionLabel,
-        startStopName: evaluation.context.line.start_stop ?? '',
-        endStopName: evaluation.context.line.end_stop ?? '',
-        candidateCount: evaluation.context.candidates.length,
-        routeCheckCount: evaluation.routeCheckCount,
-        status: evaluation.best
-          ? ('reachable' as const)
-          : evaluation.context.candidates.length === 0
-            ? ('no_candidate' as const)
-            : evaluation.successful.length > 0
-              ? ('over_budget' as const)
-              : ('no_route' as const),
-        farthestRouteId: evaluation.best?.logicalId ?? null,
-      })),
-    };
-  });
-
+    .flatMap((item) => (item.best ? [item.best] : []))
+    .sort((a, b) => b.straightLineMeters - a.straightLineMeters);
   return {
     direction: 'to',
     routeCheckCount: evaluations.reduce(
-      (sum, evaluation) => sum + evaluation.routeCheckCount,
+      (sum, item) => sum + item.summary.routeCheckCount,
       0,
     ),
-    checkedCount: allSuccessful.length,
+    checkedCount: evaluations.reduce(
+      (sum, item) => sum + item.summary.checkedCount,
+      0,
+    ),
     failedCount: evaluations.reduce(
-      (sum, evaluation) => sum + evaluation.failedCount,
+      (sum, item) => sum + item.summary.errorCount,
       0,
     ),
     reachableCount: reachable.length,
-    fastestCandidateMinutes:
-      allSuccessful.length > 0
-        ? Math.ceil(
-            Math.min(
-              ...allSuccessful.map((station) => station.durationSeconds),
-            ) / 60,
-          )
-        : null,
-    farthest,
-    nearMisses: nearMisses.map((station) => ({
-      ...station,
-      routeGeometry: [],
-    })),
+    fastestCandidateMinutes: reachable.length
+      ? Math.min(...reachable.map((item) => item.durationMinutes))
+      : null,
+    farthest: reachable[0] ?? null,
+    nearMisses: [],
     stations: reachable,
-    accessRoutes,
+    accessRoutes: activeAccessStations.map((accessStation) => {
+      const own = evaluations.filter(
+        (item) => item.context.accessStation.id === accessStation.id,
+      );
+      const routes = reachable.filter(
+        (item) => item.accessStation.id === accessStation.id,
+      );
+      return {
+        accessStationId: accessStation.id,
+        accessStationName: accessStation.name,
+        reachableCount: routes.length,
+        farthestRouteId: routes[0]?.logicalId ?? null,
+        routeIds: routes.map((item) => item.logicalId),
+        directions: own.map((item) => item.summary),
+      };
+    }),
   };
 }
 
@@ -933,130 +993,174 @@ export async function POST(request: Request) {
       ],
     }),
   );
-  const cacheKey = [
-    'station-line-direction-v2',
-    anchor.id,
-    anchor.location,
-    budgetMinutes,
-    departureDate,
-    departureTime,
-    ...accessStations
-      .map(
-        (station) =>
-          `${station.id}:${station.availableLines.slice().sort().join(',')}:${station.allowedLines.slice().sort().join(',')}`,
-      )
-      .sort(),
-  ].join('|');
-  const cached = cache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return Response.json({ ...cached.value, cached: true });
+  const selectedLineCount = accessStations.reduce(
+    (count, station) =>
+      count +
+      new Set(
+        (station.allowedLines.length
+          ? station.allowedLines
+          : station.availableLines
+        ).map(normalizeLineName),
+      ).size,
+    0,
+  );
+  if (selectedLineCount > 8)
+    return Response.json(
+      {
+        error: {
+          code: 'TOO_MANY_LINES',
+          message: `本次选择了 ${selectedLineCount} 条站点线路，请限定到 8 条以内后计算。每条线路都会完整保留其运行方向。`,
+        },
+      },
+      { status: 400 },
+    );
+  const refresh = body.refresh === true;
+  const retryDirectionId = body.retryDirectionId;
+  if (
+    (retryDirectionId !== undefined &&
+      (typeof retryDirectionId !== 'string' ||
+        retryDirectionId.length > 240)) ||
+    (body.refresh !== undefined && typeof body.refresh !== 'boolean')
+  ) {
+    return Response.json(
+      { error: { message: '重试参数不正确。' } },
+      { status: 400 },
+    );
   }
 
   try {
+    const issues: CalculationIssue[] = [];
     const walkingPlans = await runThrottled(
       accessStations,
-      250,
-      async (accessStation) =>
-        planWalking(validatedAnchor, accessStation, budgetMinutes * 60),
+      0,
+      async (station) => {
+        request.signal.throwIfAborted();
+        try {
+          return await planWalking(
+            validatedAnchor,
+            station,
+            budgetMinutes * 60,
+            refresh,
+          );
+        } catch {
+          issues.push({
+            id: `walk:${station.id}`,
+            accessStationId: station.id,
+            accessStationName: station.name,
+            message: '步行路线未取得，请重试该接驳站。',
+          });
+          return null;
+        }
+      },
     );
     const plannedAccessStations = walkingPlans.filter(
       (station): station is AccessStationWithWalk => Boolean(station),
     );
-    if (plannedAccessStations.length === 0) {
-      return Response.json(
-        {
-          error: {
-            code: 'NO_WALKING_ROUTE',
-            message: '无法取得所选接驳站点的步行路线。',
-          },
-        },
-        { status: 422 },
-      );
-    }
     const activeAccessStations = plannedAccessStations.filter(
       (station) => station.remainingTransitSeconds > 0,
     );
-    const lineSeeds = selectLineSeedsFairly(activeAccessStations, 8);
-    if (lineSeeds.length === 0) {
+    for (const station of activeAccessStations) {
+      if (!station.availableLines.length && !station.allowedLines.length)
+        issues.push({
+          id: `line:${station.id}`,
+          accessStationId: station.id,
+          accessStationName: station.name,
+          message: '本站还没有线路信息，请更新附近站点后再试。',
+        });
+    }
+    const lineSeeds = selectLineSeeds(activeAccessStations);
+    const queries = new Map<string, Promise<AMapBusLine[]>>();
+    const contexts: LineDirectionContext[] = [];
+    for (const seed of lineSeeds) {
+      request.signal.throwIfAborted();
+      const queryKey = `${seed.citycode}:${normalizeLineName(seed.lineName)}`;
+      if (!queries.has(queryKey))
+        queries.set(
+          queryKey,
+          expandTransitLine(seed.lineName, seed.citycode, refresh),
+        );
+      try {
+        const lines = await queries.get(queryKey)!;
+        const seen = new Set<string>();
+        const resolved = lines.flatMap((line) => {
+          const context = createLineDirectionContext(seed, line);
+          if (!context || seen.has(context.id)) return [];
+          seen.add(context.id);
+          return [context];
+        });
+        if (resolved.length === 0)
+          issues.push({
+            id: `line:${seed.accessStation.id}:${normalizeLineName(seed.lineName)}`,
+            accessStationId: seed.accessStation.id,
+            accessStationName: seed.accessStation.name,
+            lineName: seed.lineName,
+            message: '未匹配到本站的线路站序，方向待确认。',
+          });
+        contexts.push(...resolved);
+      } catch {
+        issues.push({
+          id: `line:${seed.accessStation.id}:${normalizeLineName(seed.lineName)}`,
+          accessStationId: seed.accessStation.id,
+          accessStationName: seed.accessStation.name,
+          lineName: seed.lineName,
+          message: '线路查询失败，方向待确认。',
+        });
+      }
+    }
+    const selectedContexts = retryDirectionId
+      ? contexts.filter((context) => context.id === retryDirectionId)
+      : contexts;
+    if (retryDirectionId && selectedContexts.length === 0) {
       return Response.json(
         {
           error: {
-            code: 'NO_TRANSIT_LINES',
-            message: '所选接驳站点没有可用于扩展的线路信息。',
+            code: 'DIRECTION_UNAVAILABLE',
+            message: '暂时无法重新取得这个方向，已保留原结果，请稍后重试。',
           },
         },
         { status: 422 },
       );
     }
-    const expandedLineGroups = await runThrottled(
-      lineSeeds,
-      250,
-      async (seed) => {
-        try {
-          return {
-            seed,
-            lines: await expandTransitLine(seed.lineName, seed.citycode),
-          };
-        } catch {
-          return { seed, lines: [] };
-        }
-      },
+    const allCandidates = selectedContexts.flatMap(
+      (context) => context.candidates,
     );
-    const contexts = expandedLineGroups.flatMap(({ seed, lines }) => {
-      const seenDirections = new Set<string>();
-      const resolvedDirections = lines.flatMap((line) => {
-        const directionKey = `${line.start_stop ?? ''}::${line.end_stop ?? ''}`;
-        if (seenDirections.has(directionKey)) return [];
-        const context = createLineDirectionContext(seed, line);
-        if (!context) return [];
-        seenDirections.add(directionKey);
-        return [context];
-      });
-      return resolvedDirections.slice(0, 2);
-    });
-    const allCandidates = contexts.flatMap((context) => context.candidates);
-    if (contexts.length === 0) {
-      return Response.json(
-        {
-          error: {
-            code: 'NO_LINE_CANDIDATES',
-            message: '没有从所选线路中取得可计算的沿线站点。',
-          },
-        },
-        { status: 422 },
-      );
-    }
-    const networkSpanMeters =
-      allCandidates.length > 0
-        ? Math.max(
-            ...allCandidates.map((station) =>
-              straightLineDistance(validatedAnchor.location, station.location),
-            ),
-          )
-        : 0;
-
     const to = await evaluateDirection(
-      contexts,
+      selectedContexts,
       activeAccessStations,
       departureDate,
       departureTime,
       validatedAnchor.location,
+      refresh,
+      Boolean(retryDirectionId),
+      request.signal,
     );
     const result: ReachabilityResult = {
       sampled: true,
       candidateSource: 'transit_lines',
       budgetMinutes,
-      networkSpanMeters,
+      networkSpanMeters: Math.max(
+        0,
+        ...allCandidates.map((station) =>
+          straightLineDistance(validatedAnchor.location, station.location),
+        ),
+      ),
       candidateCount: allCandidates.length,
-      lineQueryCount: lineSeeds.length,
-      expandedLineCount: contexts.length,
+      lineQueryCount: queries.size,
+      expandedLineCount: selectedContexts.length,
       routeCheckCount: to.routeCheckCount,
       selectedAccessStationCount: accessStations.length,
+      partial: Boolean(retryDirectionId),
+      issues,
+      cachedDirectionCount: to.accessRoutes
+        .flatMap((group) => group.directions)
+        .filter((direction) => direction.cached).length,
       accessStationBudgets: plannedAccessStations.map((station) => ({
         id: station.id,
         name: station.name,
         walkingDistanceMeters: station.walkingDistanceMeters,
         walkingMinutes: Math.ceil(station.walkingDurationSeconds / 60),
+        walkingDurationSeconds: station.walkingDurationSeconds,
+        remainingTransitSeconds: station.remainingTransitSeconds,
         remainingTransitMinutes: Math.floor(
           station.remainingTransitSeconds / 60,
         ),
@@ -1064,8 +1168,6 @@ export async function POST(request: Request) {
       })),
       directions: { to },
     };
-
-    cache.set(cacheKey, { expiresAt: Date.now() + 5 * 60_000, value: result });
     return Response.json(result);
   } catch (error) {
     return amapErrorResponse(error);

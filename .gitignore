@@ -9,6 +9,8 @@ coverage/
 .wrangler/
 .sites-artifacts/
 .sites-web-git/
+*.tsbuildinfo
+.sites-runtime/
 
 # Local environment and secrets
 .env

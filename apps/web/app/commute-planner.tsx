@@ -26,6 +26,13 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
+import { DirectionStatusCard } from '@/components/direction-status-card';
+import { mergeDirectionResult } from '@/lib/merge-direction-result';
+import { formatDuration } from '@/lib/duration';
+import type {
+  CalculationIssue,
+  DirectionSummary,
+} from '@/lib/reachability-types';
 import {
   addRecentPlace,
   clearAllLocalMemory,
@@ -120,17 +127,7 @@ type DirectionReachability = {
     reachableCount: number;
     farthestRouteId: string | null;
     routeIds: string[];
-    directions: Array<{
-      id: string;
-      lineName: string;
-      directionLabel: string;
-      startStopName: string;
-      endStopName: string;
-      candidateCount: number;
-      routeCheckCount: number;
-      status: 'reachable' | 'over_budget' | 'no_route' | 'no_candidate';
-      farthestRouteId: string | null;
-    }>;
+    directions: DirectionSummary[];
   }>;
 };
 
@@ -144,12 +141,17 @@ type ReachabilityResult = {
   expandedLineCount: number;
   routeCheckCount: number;
   selectedAccessStationCount: number;
+  partial: boolean;
+  issues: CalculationIssue[];
+  cachedDirectionCount: number;
   accessStationBudgets: Array<{
     id: string;
     name: string;
     walkingDistanceMeters: number;
     walkingMinutes: number;
+    walkingDurationSeconds: number;
     remainingTransitMinutes: number;
+    remainingTransitSeconds: number;
     usable: boolean;
   }>;
   directions: {
@@ -268,7 +270,7 @@ function commuteMemoryKey(
   selectedLineKeys: string[],
 ) {
   return [
-    'commute:v6',
+    'commute:v8',
     place.location,
     budget,
     departureDate,
@@ -359,6 +361,10 @@ export function CommutePlanner() {
     lineKeys: string[];
   } | null>(null);
   const skipMemoryWriteRef = useRef(false);
+  const calculationRef = useRef<AbortController | null>(null);
+  const [retryingDirectionId, setRetryingDirectionId] = useState<string | null>(
+    null,
+  );
   const [mapState, setMapState] = useState<'loading' | 'ready' | 'error'>(
     'loading',
   );
@@ -667,6 +673,9 @@ export function CommutePlanner() {
   }, []);
 
   function resetReachability() {
+    calculationRef.current?.abort();
+    calculationRef.current = null;
+    setRetryingDirectionId(null);
     setReachability(null);
     setReachabilityState('idle');
     setActiveRouteId(null);
@@ -1085,9 +1094,12 @@ export function CommutePlanner() {
       if (initialStation) {
         setActiveRouteId(initialStation.logicalId);
         drawReachabilityMap(data, initialStation);
+      } else {
+        setActiveRouteId(null);
+        drawNearbyStations(stations);
       }
     },
-    [drawReachabilityMap],
+    [drawReachabilityMap, drawNearbyStations, stations],
   );
 
   useEffect(() => {
@@ -1155,14 +1167,37 @@ export function CommutePlanner() {
     }
   }
 
-  async function calculateReachability(forceRefresh = false) {
+  async function calculateReachability(
+    forceRefresh = false,
+    retryDirectionId?: string,
+    skipLocal = false,
+  ) {
     const place = selectedPlace;
     if (!place || selectedStationIds.length === 0) return;
-    setReachabilityState('loading');
-    setReachability(null);
-    setActiveRouteId(null);
+    const previous = reachability;
+    const retryGroup = retryDirectionId
+      ? previous?.directions.to.accessRoutes.find((group) =>
+          group.directions.some(
+            (direction) => direction.id === retryDirectionId,
+          ),
+        )
+      : undefined;
+    const retryDirection = retryGroup?.directions.find(
+      (direction) => direction.id === retryDirectionId,
+    );
+    if (retryDirectionId && (!previous || !retryGroup || !retryDirection))
+      return;
+    calculationRef.current?.abort();
+    const controller = new AbortController();
+    calculationRef.current = controller;
+    setRetryingDirectionId(retryDirectionId ?? null);
+    if (!retryDirectionId) {
+      setReachabilityState('loading');
+      setReachability(null);
+      setActiveRouteId(null);
+      setCommuteMemory(null);
+    }
     setReachabilityError('');
-    setCommuteMemory(null);
     const cacheKey = commuteMemoryKey(
       place,
       budget,
@@ -1174,21 +1209,32 @@ export function CommutePlanner() {
     const cached = rememberLocally
       ? await readCommuteCache<RememberedCommuteResult>(cacheKey)
       : null;
+    if (controller.signal.aborted) return;
 
-    if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
+    if (
+      !forceRefresh &&
+      !retryDirectionId &&
+      !skipLocal &&
+      cached &&
+      cached.expiresAt > Date.now()
+    ) {
       applyReachabilityResult(cached.data.result, cached.data.activeRouteId, {
         savedAt: cached.createdAt,
         stale: false,
         fallback: false,
       });
+      calculationRef.current = null;
       return;
     }
 
     try {
       const response = await fetch('/api/amap/reachability', {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          refresh: forceRefresh,
+          retryDirectionId,
           anchor: {
             id: place.id,
             name: place.name,
@@ -1198,7 +1244,11 @@ export function CommutePlanner() {
           departureDate,
           departureTime,
           accessStations: stations
-            .filter((station) => selectedStationIds.includes(station.id))
+            .filter((station) =>
+              retryGroup
+                ? station.id === retryGroup.accessStationId
+                : selectedStationIds.includes(station.id),
+            )
             .map((station) => ({
               id: station.id,
               name: station.name,
@@ -1206,15 +1256,18 @@ export function CommutePlanner() {
               citycode: station.citycode,
               distanceMeters: station.distanceMeters,
               availableLines: station.lines,
-              allowedLines: station.lines.filter((line) =>
-                selectedLineKeys.includes(stationLineKey(station.id, line)),
-              ),
+              allowedLines: retryDirection
+                ? [retryDirection.lineName]
+                : station.lines.filter((line) =>
+                    selectedLineKeys.includes(stationLineKey(station.id, line)),
+                  ),
             })),
         }),
       });
       const payload = (await response.json()) as
         | ReachabilityResult
         | { error?: { message?: string } };
+      if (controller.signal.aborted) return;
       if (!response.ok || !('directions' in payload)) {
         throw new Error(
           'error' in payload && payload.error?.message
@@ -1222,22 +1275,36 @@ export function CommutePlanner() {
             : '通勤圈计算失败，请稍后重试。',
         );
       }
-      const data = payload;
+      const data =
+        retryDirectionId && previous
+          ? mergeDirectionResult(previous, payload)
+          : payload;
       const initialStation =
         data.directions.to.farthest ?? data.directions.to.stations[0];
       const savedAt = Date.now();
       applyReachabilityResult(
         data,
-        initialStation?.logicalId ?? null,
+        retryDirectionId ? activeRouteId : (initialStation?.logicalId ?? null),
         rememberLocally ? { savedAt, stale: false, fallback: false } : null,
       );
       if (rememberLocally) {
         void writeCommuteCache(cacheKey, {
           result: data,
-          activeRouteId: initialStation?.logicalId ?? null,
+          activeRouteId: retryDirectionId
+            ? activeRouteId
+            : (initialStation?.logicalId ?? null),
         } satisfies RememberedCommuteResult);
       }
     } catch (error) {
+      if (controller.signal.aborted) return;
+      if (retryDirectionId) {
+        setReachabilityError(
+          error instanceof Error
+            ? error.message
+            : '这个方向暂时无法更新，已保留原结果。',
+        );
+        return;
+      }
       if (cached) {
         applyReachabilityResult(cached.data.result, cached.data.activeRouteId, {
           savedAt: cached.createdAt,
@@ -1250,6 +1317,11 @@ export function CommutePlanner() {
         error instanceof Error ? error.message : '通勤圈计算失败。',
       );
       setReachabilityState('error');
+    } finally {
+      if (calculationRef.current === controller) {
+        calculationRef.current = null;
+        setRetryingDirectionId(null);
+      }
     }
   }
 
@@ -1275,9 +1347,6 @@ export function CommutePlanner() {
         ),
       )
       .filter((station): station is ReachableStation => Boolean(station)),
-    unresolvedDirections: group.directions.filter(
-      (direction) => !direction.farthestRouteId,
-    ),
   }));
   const overviewRouteCount = accessRouteGroups.reduce(
     (count, group) => count + group.routeIds.length,
@@ -1916,6 +1985,7 @@ export function CommutePlanner() {
                 className="calculate-action"
                 disabled={
                   reachabilityState === 'loading' ||
+                  Boolean(retryingDirectionId) ||
                   selectedStationIds.length === 0
                 }
                 onClick={() => void calculateReachability()}
@@ -1934,8 +2004,7 @@ export function CommutePlanner() {
                   <div>
                     <strong>正在展开接驳站的线路与完整站序</strong>
                     <small>
-                      再按剩余预算核验住所到公司的公共交通路线，通常需要 8～30
-                      秒。
+                      各方向独立核验；线路较多时需要更长时间，已有核验结果会优先复用。
                     </small>
                   </div>
                 </output>
@@ -1963,6 +2032,38 @@ export function CommutePlanner() {
                 <Radar aria-hidden="true" />
               </div>
 
+              {reachabilityError && (
+                <p className="inline-error">
+                  <CircleAlert />
+                  {reachabilityError}
+                </p>
+              )}
+              {reachability.issues.length > 0 && (
+                <div className="calculation-issues">
+                  <strong>以下部分还未完成核验</strong>
+                  {reachability.issues.map((issue) => (
+                    <p key={issue.id}>
+                      {issue.accessStationName}
+                      {issue.lineName ? ` · ${issue.lineName}` : ''}：
+                      {issue.message}
+                    </p>
+                  ))}
+                  <button
+                    type="button"
+                    disabled={Boolean(retryingDirectionId)}
+                    onClick={() =>
+                      void calculateReachability(false, undefined, true)
+                    }
+                  >
+                    重试未完成部分
+                  </button>
+                </div>
+              )}
+              <p className="verification-note">
+                {reachability.cachedDirectionCount > 0 &&
+                  `复用了 ${reachability.cachedDirectionCount} 个方向的核验结果。`}
+                只有完成边界核验的方向才标为“最远站已确认”。
+              </p>
               {commuteMemory && (
                 <div
                   className={`memory-source-note commute-memory-note${commuteMemory.stale ? ' is-stale' : ''}`}
@@ -1978,6 +2079,7 @@ export function CommutePlanner() {
                   </span>
                   <button
                     type="button"
+                    disabled={Boolean(retryingDirectionId)}
                     onClick={() => void calculateReachability(true)}
                   >
                     <RefreshCw aria-hidden="true" /> 更新
@@ -2014,8 +2116,10 @@ export function CommutePlanner() {
                 {reachability.accessStationBudgets.map((station) => (
                   <span key={station.id}>
                     <strong>{station.name}</strong>
-                    步行 {station.walkingMinutes} 分钟 · 公共交通预算{' '}
-                    {station.remainingTransitMinutes} 分钟
+                    步行 {formatDuration(station.walkingDurationSeconds)} ·
+                    公共交通预算{' '}
+                    {formatDuration(station.remainingTransitSeconds)}
+                    {!station.usable && ' · 步行已用完预算'}
                   </span>
                 ))}
               </div>
@@ -2033,7 +2137,7 @@ export function CommutePlanner() {
                         <Trophy />
                       </span>
                       <div>
-                        <small>最远可达住所侧站点</small>
+                        <small>已验证结果中距离公司最远</small>
                         <strong>
                           {reachability.directions.to.farthest.name}
                         </strong>
@@ -2054,16 +2158,17 @@ export function CommutePlanner() {
                               .name
                           }{' '}
                           · 公共交通{' '}
-                          {
+                          {formatDuration(
                             reachability.directions.to.farthest
-                              .transitDurationMinutes
-                          }{' '}
-                          分钟 + 步行{' '}
-                          {
-                            reachability.directions.to.farthest.accessStation
-                              .walkingMinutes
-                          }{' '}
-                          分钟
+                              .transitDurationSeconds,
+                          )}
+                          {' + 步行 '}
+                          {formatDuration(
+                            reachability.directions.to.farthest
+                              .durationSeconds -
+                              reachability.directions.to.farthest
+                                .transitDurationSeconds,
+                          )}
                         </span>
                       </div>
                     </div>
@@ -2148,14 +2253,29 @@ export function CommutePlanner() {
                                   </small>
                                   <small>
                                     到 {station.accessStation.name} · 公共交通{' '}
-                                    {station.transitDurationMinutes} + 步行{' '}
-                                    {station.accessStation.walkingMinutes} 分钟
+                                    {formatDuration(
+                                      station.transitDurationSeconds,
+                                    )}{' '}
+                                    + 步行{' '}
+                                    {formatDuration(
+                                      station.durationSeconds -
+                                        station.transitDurationSeconds,
+                                    )}
                                   </small>
                                   <small>
                                     {displayLineName(
                                       station.lineDirection.lineName,
                                     )}{' '}
                                     · {station.lineDirection.directionLabel}
+                                  </small>
+                                  <small>
+                                    {group.directions.find(
+                                      (direction) =>
+                                        direction.id ===
+                                        station.lineDirection.id,
+                                    )?.boundaryConfirmed
+                                      ? '本方向最远站已确认'
+                                      : '已验证可达 · 最远边界待确认'}
                                   </small>
                                   {station.routeLines.length > 0 && (
                                     <small>
@@ -2175,31 +2295,27 @@ export function CommutePlanner() {
                           </div>
                         ) : (
                           <p className="direction-empty">
-                            当前预算内没有经该接驳站到公司的可达方向
+                            暂无已验证可达路线，请查看下方核验状态。
                           </p>
                         )}
-                        {group.unresolvedDirections.length > 0 && (
-                          <div className="direction-status-list">
-                            {group.unresolvedDirections.map((direction) => (
-                              <small key={direction.id}>
-                                {displayLineName(direction.lineName)} ·{' '}
-                                {direction.directionLabel}：
-                                {direction.status === 'over_budget'
-                                  ? '超出剩余公交时间'
-                                  : direction.status === 'no_candidate'
-                                    ? '该方向没有上游站点'
-                                    : '高德未返回可用路线'}
-                              </small>
-                            ))}
-                          </div>
-                        )}
+                        {group.directions.map((direction) => (
+                          <DirectionStatusCard
+                            key={direction.id}
+                            direction={direction}
+                            busy={retryingDirectionId === direction.id}
+                            disabled={Boolean(retryingDirectionId)}
+                            onRetry={() =>
+                              void calculateReachability(false, direction.id)
+                            }
+                          />
+                        ))}
                       </section>
                     ))}
                   </div>
                 </section>
               </div>
               <p className="sampling-note">
-                每个接驳站、线路和行驶方向独立计算；先扣除工作地点到接驳站的步行时间，再沿该方向站序查找剩余时间内最远可达站。地图默认显示所有可达方向，点击候选可单独高亮。
+                各方向使用相同的核验上限，先扣除工作地点到接驳站的步行时间，再核验指定线路的直达方案。达到上限时保留已验证可达站，剩余站点可继续核验；接口失败不会被判为超时。点击路线可在地图上高亮。
               </p>
             </div>
           )}
@@ -2245,12 +2361,12 @@ export function CommutePlanner() {
               <>
                 <span>
                   <i className="legend-farthest" />
-                  最远可达
+                  已验证最远结果
                 </span>
                 {overviewRouteCount > 1 && (
                   <span>
                     <i className="legend-overview-route" />
-                    其他接驳站路线
+                    其他方向路线
                   </span>
                 )}
                 {routeLineLegend.map((line) => (
