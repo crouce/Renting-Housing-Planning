@@ -59,9 +59,12 @@ export function mergeCommunities(previous: Community[], incoming: Community[]) {
       item.id,
       old
         ? {
-            ...old,
+            ...item,
             distanceMeters: Math.min(old.distanceMeters, item.distanceMeters),
-            seedIds: [...new Set([...old.seedIds, ...item.seedIds])],
+            seedIds:
+              old.location === item.location
+                ? [...new Set([...old.seedIds, ...item.seedIds])]
+                : item.seedIds,
           }
         : item,
     );

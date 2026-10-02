@@ -19,6 +19,7 @@ type TransitMode = 'BUS' | 'SUBWAY' | 'LIGHT_RAIL';
 
 type ReachabilityRequest = {
   refresh?: boolean;
+  resume?: boolean;
   retryDirectionId?: string;
   anchor?: {
     id?: string;
@@ -257,9 +258,12 @@ type DirectionEvaluation = {
   best: ReachableStation | null;
   summary: DirectionSummary;
 };
-const directionCache = new BoundedCache<Omit<DirectionEvaluation, 'context'>>(
-  48,
-);
+// Raw, budget-independent evidence. Keep geometry even for over-budget rides,
+// so a different budget can select a new farthest stop without repeating calls.
+const directionCache = new BoundedCache<{
+  budgetSeconds: number;
+  observations: Observation<ReachableStation>[];
+}>(48, 4 * 1024 * 1024);
 const pendingDirections = new Map<
   string,
   Promise<Omit<DirectionEvaluation, 'context'>>
@@ -662,7 +666,6 @@ async function checkTransit(
             ? { ...segment, bus: { buslines: [busline] } }
             : segment,
         );
-        const reachable = seconds <= accessStation.remainingTransitSeconds;
         const planned: ReachableStation = {
           ...station,
           transitDurationSeconds: seconds,
@@ -678,7 +681,7 @@ async function checkTransit(
           segmentCount: 1,
           routeLines: [busline.name!],
           matchedLines: [context.requestedLineName],
-          routeGeometry: reachable ? collectRouteGeometry(chosenSegments) : [],
+          routeGeometry: collectRouteGeometry(chosenSegments),
           lineDirection: {
             id: context.id,
             lineName: context.requestedLineName,
@@ -711,10 +714,7 @@ async function checkTransit(
           ? 'reachable'
           : 'over_budget',
       durationSeconds: route.transitDurationSeconds,
-      route:
-        route.transitDurationSeconds <= accessStation.remainingTransitSeconds
-          ? route
-          : undefined,
+      route,
     };
   } catch (error) {
     return {
@@ -736,28 +736,54 @@ async function evaluateLineDirection(
   resume: boolean,
 ): Promise<DirectionEvaluation> {
   const key = JSON.stringify([
-    'verified-directions-v2',
+    'route-evidence-v3',
     anchorLocation,
     context.id,
     context.requestedLineName,
     context.accessStation.location,
     context.accessStation.citycode,
-    context.accessStation.walkingDurationSeconds,
-    context.accessStation.remainingTransitSeconds,
     departureDate,
     departureTime,
     context.accessStopIndex,
     context.line.name,
     context.line.busstops,
   ]);
-  const cached = refresh ? undefined : directionCache.get(key);
-  if (cached && !resume)
-    return {
-      ...cached,
-      context,
-      summary: { ...cached.summary, cached: true, routeCheckCount: 0 },
-    };
-  const pending = pendingDirections.get(key);
+  if (refresh) directionCache.delete(key);
+  const cached = directionCache.get(key);
+  const budgetSeconds = context.accessStation.remainingTransitSeconds;
+  const previous = (cached?.observations ?? [])
+    .filter(
+      (item) => item.checkedAt && Date.now() - item.checkedAt < 10 * 60_000,
+    )
+    .map((item): Observation<ReachableStation> => {
+      if (!item.route || item.durationSeconds === undefined) return item;
+      const walk = context.accessStation.walkingDurationSeconds;
+      return {
+        ...item,
+        status:
+          item.durationSeconds <= budgetSeconds ? 'reachable' : 'over_budget',
+        route: {
+          ...item.route,
+          durationSeconds: item.durationSeconds + walk,
+          durationMinutes: Math.ceil((item.durationSeconds + walk) / 60),
+          accessStation: {
+            ...item.route.accessStation,
+            walkingDistanceMeters: context.accessStation.walkingDistanceMeters,
+            walkingMinutes: Math.ceil(walk / 60),
+            remainingTransitSeconds: budgetSeconds,
+            remainingTransitMinutes: Math.floor(budgetSeconds / 60),
+          },
+        },
+      };
+    });
+  const pendingKey = JSON.stringify([
+    key,
+    budgetSeconds,
+    context.accessStation.walkingDurationSeconds,
+    refresh,
+    resume,
+  ]);
+  const pending = pendingDirections.get(pendingKey);
   if (pending) {
     const value = await pending;
     return {
@@ -769,22 +795,29 @@ async function evaluateLineDirection(
   const calculate = async (): Promise<Omit<DirectionEvaluation, 'context'>> => {
     const searched = await searchDirection<ReachableStation>({
       count: context.candidates.length,
-      previous: cached?.observations,
-      check: (index) =>
-        checkTransit(
+      previous,
+      // An unchanged result is a fast read. Explicitly resume incomplete work;
+      // changed budgets or expired evidence must be evaluated again.
+      limit:
+        cached &&
+        !resume &&
+        cached.budgetSeconds === budgetSeconds &&
+        previous.length === cached.observations.length
+          ? 0
+          : undefined,
+      check: async (index) => ({
+        ...(await checkTransit(
           context.candidates[index],
           context,
           departureDate,
           departureTime,
           anchorLocation,
-        ),
+        )),
+        checkedAt: Date.now(),
+      }),
     });
     const best = searched.best?.route ?? null;
-    // Retain only the best route's geometry; all other checkpoints need just timing/status.
-    const observations = searched.observations.map((item) => ({
-      ...item,
-      route: item.index === searched.best?.index ? item.route : undefined,
-    }));
+    const observations = searched.observations;
     const relevant = observations.filter((item) =>
       searched.unresolved.includes(item.index),
     );
@@ -805,7 +838,12 @@ async function evaluateLineDirection(
       errorCount: relevant.filter((item) => item.status === 'error').length,
       noRouteCount: relevant.filter((item) => item.status === 'no_route')
         .length,
-      cached: false,
+      cached: Boolean(cached) && searched.calls === 0,
+      checkedAt: Math.min(
+        Date.now(),
+        ...observations.map((item) => item.checkedAt ?? Date.now()),
+      ),
+      reusedCheckCount: previous.filter((item) => item.route).length,
       farthestRouteId: best?.logicalId ?? null,
       boardingStations: observations.flatMap((observation) => {
         if (
@@ -871,15 +909,15 @@ async function evaluateLineDirection(
       }),
     };
     const value = { observations, best, summary };
-    directionCache.set(key, value, 10 * 60_000);
+    directionCache.set(key, { budgetSeconds, observations }, 10 * 60_000);
     return value;
   };
   const task = calculate();
-  pendingDirections.set(key, task);
+  pendingDirections.set(pendingKey, task);
   try {
     return { ...(await task), context };
   } finally {
-    pendingDirections.delete(key);
+    pendingDirections.delete(pendingKey);
   }
 }
 
@@ -1069,7 +1107,8 @@ export async function POST(request: Request) {
     (retryDirectionId !== undefined &&
       (typeof retryDirectionId !== 'string' ||
         retryDirectionId.length > 240)) ||
-    (body.refresh !== undefined && typeof body.refresh !== 'boolean')
+    (body.refresh !== undefined && typeof body.refresh !== 'boolean') ||
+    (body.resume !== undefined && typeof body.resume !== 'boolean')
   ) {
     return Response.json(
       { error: { message: '重试参数不正确。' } },
@@ -1180,7 +1219,7 @@ export async function POST(request: Request) {
       departureTime,
       validatedAnchor.location,
       refresh,
-      Boolean(retryDirectionId),
+      Boolean(retryDirectionId || body.resume),
       request.signal,
     );
     const result: ReachabilityResult = {

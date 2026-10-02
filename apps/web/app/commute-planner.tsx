@@ -273,7 +273,7 @@ function commuteMemoryKey(
   selectedLineKeys: string[],
 ) {
   return [
-    'commute:v9',
+    'commute:v10',
     place.location,
     budget,
     departureDate,
@@ -414,6 +414,19 @@ export function CommutePlanner() {
     stale: boolean;
     fallback: boolean;
   } | null>(null);
+
+  useEffect(() => {
+    if (!commuteMemory || commuteMemory.stale) return;
+    const timer = window.setTimeout(
+      () => {
+        setCommuteMemory((current) =>
+          current ? { ...current, stale: true } : current,
+        );
+      },
+      Math.max(0, commuteMemory.savedAt + 10 * 60_000 - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [commuteMemory]);
 
   useEffect(() => {
     if (
@@ -1306,12 +1319,12 @@ export function CommutePlanner() {
     );
     if (retryDirectionId && (!previous || !retryGroup || !retryDirection))
       return;
-    focusResultsAfterRenderRef.current = !retryDirectionId;
+    focusResultsAfterRenderRef.current = !retryDirectionId && !skipLocal;
     calculationRef.current?.abort();
     const controller = new AbortController();
     calculationRef.current = controller;
-    setRetryingDirectionId(retryDirectionId ?? null);
-    if (!retryDirectionId) {
+    setRetryingDirectionId(retryDirectionId ?? 'all');
+    if (!retryDirectionId && !skipLocal) {
       setReachabilityState('loading');
       setReachability(null);
       setActiveRouteId(null);
@@ -1344,6 +1357,7 @@ export function CommutePlanner() {
         fallback: false,
       });
       calculationRef.current = null;
+      setRetryingDirectionId(null);
       return;
     }
 
@@ -1355,6 +1369,7 @@ export function CommutePlanner() {
         body: JSON.stringify({
           refresh: forceRefresh,
           retryDirectionId,
+          resume: Boolean(retryDirectionId || skipLocal),
           anchor: {
             id: place.id,
             name: place.name,
@@ -1401,23 +1416,38 @@ export function CommutePlanner() {
           : payload;
       const initialStation =
         data.directions.to.farthest ?? data.directions.to.stations[0];
-      const savedAt = Date.now();
+      const savedAt = Math.min(
+        Date.now(),
+        ...data.directions.to.accessRoutes.flatMap((group) =>
+          group.directions.map(
+            (direction) => direction.checkedAt ?? Date.now(),
+          ),
+        ),
+      );
       applyReachabilityResult(
         data,
         retryDirectionId ? activeRouteId : (initialStation?.logicalId ?? null),
-        rememberLocally ? { savedAt, stale: false, fallback: false } : null,
+        {
+          savedAt,
+          stale: Date.now() - savedAt >= 10 * 60_000,
+          fallback: false,
+        },
       );
       if (rememberLocally) {
-        void writeCommuteCache(cacheKey, {
-          result: data,
-          activeRouteId: retryDirectionId
-            ? activeRouteId
-            : (initialStation?.logicalId ?? null),
-        } satisfies RememberedCommuteResult);
+        void writeCommuteCache(
+          cacheKey,
+          {
+            result: data,
+            activeRouteId: retryDirectionId
+              ? activeRouteId
+              : (initialStation?.logicalId ?? null),
+          } satisfies RememberedCommuteResult,
+          savedAt,
+        );
       }
     } catch (error) {
       if (controller.signal.aborted) return;
-      if (retryDirectionId) {
+      if (retryDirectionId || (skipLocal && previous)) {
         setReachabilityError(
           error instanceof Error
             ? error.message
@@ -2055,12 +2085,10 @@ export function CommutePlanner() {
                     >
                       <Database aria-hidden="true" />
                       <span>
-                        {stationMemory.stale
-                          ? '备用的本机记录'
-                          : '本机站点记录'}{' '}
-                        · {memoryAgeLabel(stationMemory.savedAt)}
+                        {stationMemory.stale ? '历史结果' : '近期结果'} ·{' '}
+                        {memoryAgeLabel(stationMemory.savedAt)}
                       </span>
-                      {stationMemory.stale && <strong>建议刷新</strong>}
+                      {stationMemory.stale && <strong>需要更新</strong>}
                     </div>
                   )}
                   <div className="station-selection-summary">
@@ -2256,39 +2284,50 @@ export function CommutePlanner() {
                         {issue.message}
                       </p>
                     ))}
+                  </div>
+                )}
+                <div className="result-update-bar">
+                  <span className="result-freshness">
+                    {commuteMemory?.stale ? '历史结果 · 需要更新' : '近期结果'}
+                    {commuteMemory &&
+                      ` · ${memoryAgeLabel(commuteMemory.savedAt)}`}
+                    {commuteMemory?.fallback && ' · 接口失败，已保留历史记录'}
+                  </span>
+                  <div className="result-update-actions">
                     <button
                       type="button"
-                      disabled={Boolean(retryingDirectionId)}
+                      disabled={
+                        Boolean(retryingDirectionId) ||
+                        (!commuteMemory?.stale &&
+                          !reachability.issues.length &&
+                          reachability.directions.to.accessRoutes.every(
+                            (group) =>
+                              group.directions.every(
+                                (direction) => direction.boundaryConfirmed,
+                              ),
+                          ))
+                      }
                       onClick={() =>
                         void calculateReachability(false, undefined, true)
                       }
                     >
-                      重试未完成部分
+                      {retryingDirectionId === 'all'
+                        ? '正在补查…'
+                        : '补查未完成'}
                     </button>
+                    <details className="update-menu">
+                      <summary>更多更新</summary>
+                      <button
+                        type="button"
+                        disabled={Boolean(retryingDirectionId)}
+                        onClick={() => void calculateReachability(true)}
+                      >
+                        全部重新查询
+                      </button>
+                      <small>忽略近期缓存，会重新调用地图接口。</small>
+                    </details>
                   </div>
-                )}
-                {commuteMemory && (
-                  <div
-                    className={`memory-source-note commute-memory-note${commuteMemory.stale ? ' is-stale' : ''}`}
-                  >
-                    <Database aria-hidden="true" />
-                    <span>
-                      {commuteMemory.fallback
-                        ? '接口失败，已显示上次成功结果'
-                        : commuteMemory.stale
-                          ? '上次保存的通勤结果'
-                          : '本机通勤结果'}{' '}
-                      · {memoryAgeLabel(commuteMemory.savedAt)}
-                    </span>
-                    <button
-                      type="button"
-                      disabled={Boolean(retryingDirectionId)}
-                      onClick={() => void calculateReachability(true)}
-                    >
-                      <RefreshCw aria-hidden="true" /> 更新
-                    </button>
-                  </div>
-                )}
+                </div>
 
                 <details className="calculation-details">
                   <summary>计算概况与步行预算</summary>

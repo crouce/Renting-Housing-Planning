@@ -7,6 +7,7 @@ export type Observation<T> = {
   route?: T;
   durationSeconds?: number;
   errorCode?: string;
+  checkedAt?: number;
 };
 
 export const CHECKS_PER_DIRECTION = 8;

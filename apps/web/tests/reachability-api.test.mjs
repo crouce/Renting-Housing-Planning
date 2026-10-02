@@ -165,7 +165,9 @@ test('POST preserves independent precision, strict direct routes, reuse, and tar
     const own = summary(multiple).filter(
       (direction) => direction.lineName === '2号线',
     );
-    assert.deepEqual(own, summary(alone));
+    const withoutTime = (items) =>
+      items.map(({ checkedAt: _checkedAt, ...item }) => item);
+    assert.deepEqual(withoutTime(own), withoutTime(summary(alone)));
     assert.equal(multiple.directions.to.stations.length, 10);
     const boarding = summary(multiple).flatMap(
       (direction) => direction.boardingStations,
@@ -195,6 +197,44 @@ test('POST preserves independent precision, strict direct routes, reuse, and tar
     assert.equal(reused.cachedDirectionCount, 2);
     assert.equal(reused.routeCheckCount, 0);
     assert.equal(calls.length, 0, 'reuse walking, line and direction evidence');
+    const grown = await post({ ...body, budgetMinutes: 45 });
+    assert.equal(
+      calls.length,
+      0,
+      'known over-budget evidence becomes reachable without API calls',
+    );
+    assert.ok(
+      grown.directions.to.stations.every(
+        (route) =>
+          route.durationMinutes === 45 && route.routeGeometry.length > 0,
+      ),
+    );
+    assert.deepEqual(
+      summary(grown).map((item) => item.checkedAt),
+      summary(reused).map((item) => item.checkedAt),
+      'reclassification must not renew evidence freshness',
+    );
+    const shrunk = await post({ ...body, budgetMinutes: 20 });
+    assert.ok(
+      shrunk.directions.to.stations.every(
+        (route) =>
+          route.durationMinutes === 20 && route.routeGeometry.length > 0,
+      ),
+    );
+    assert.ok(
+      calls.every(
+        (call) =>
+          call.origin && Math.abs(stopsById.get(call.origin).offset) < 6,
+      ),
+      'only unknown inner candidates may be queried after shrinking the budget',
+    );
+    calls.length = 0;
+    await post({ ...body, resume: true });
+    assert.equal(
+      calls.length,
+      0,
+      'complete directions are not re-queried by supplement action',
+    );
     const retried = await post({
       ...body,
       retryDirectionId: summary(alone)[0].id,
@@ -215,9 +255,43 @@ test('POST preserves independent precision, strict direct routes, reuse, and tar
     assert.ok(pending.errorCount > 0);
     assert.ok(pending.evidence.some((item) => item.status === 'error'));
     failure = false;
-    const recovered = await post({ ...body, retryDirectionId: pending.id });
+    calls.length = 0;
+    const recovered = await post({ ...body, resume: true });
+    assert.ok(
+      calls.length > 0 &&
+        calls.every(
+          (call) =>
+            call.origin?.startsWith('2号线:-') &&
+            !pending.evidence.some(
+              (item) =>
+                ['reachable', 'over_budget'].includes(item.status) &&
+                item.stationName === stopsById.get(call.origin)?.stop.name,
+            ),
+        ),
+      'global supplement only checks inconclusive or unknown evidence, not confirmed routes/directions',
+    );
     assert.equal(summary(recovered)[0].errorCount, 0);
     assert.equal(summary(recovered)[0].boundaryConfirmed, true);
+
+    calls.length = 0;
+    await post({ ...body, departureTime: '09:30' });
+    assert.ok(
+      calls.some((call) => call.path.includes('transit')),
+      'changed departure time invalidates route evidence',
+    );
+    calls.length = 0;
+    const oldNow = Date.now;
+    const later = oldNow() + 11 * 60_000;
+    Date.now = () => later;
+    try {
+      await post(body);
+      assert.ok(
+        calls.some((call) => call.path.includes('transit')),
+        'expired evidence is not revived by an intervening cache hit',
+      );
+    } finally {
+      Date.now = oldNow;
+    }
   } finally {
     globalThis.setTimeout = realTimeout;
   }

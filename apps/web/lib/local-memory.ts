@@ -37,7 +37,7 @@ export const RECENT_PLACE_LIMIT = 5;
 export const STATION_CACHE_LIMIT = 6;
 export const STATION_CACHE_FRESH_MS = 24 * 60 * 60 * 1000;
 export const COMMUTE_CACHE_LIMIT = 4;
-export const COMMUTE_CACHE_FRESH_MS = 2 * 60 * 60 * 1000;
+export const COMMUTE_CACHE_FRESH_MS = 10 * 60 * 1000;
 export const CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type LocalCacheRecord<T> = {
@@ -204,6 +204,7 @@ async function writeCache<T>(
   data: T,
   freshForMs: number,
   limit: number,
+  checkedAt = Date.now(),
 ) {
   if (!isLocalMemoryEnabled()) return;
   try {
@@ -213,9 +214,9 @@ async function writeCache<T>(
       const transaction = database.transaction(storeName, 'readwrite');
       transaction.objectStore(storeName).put({
         key,
-        createdAt: now,
+        createdAt: checkedAt,
         lastAccessedAt: now,
-        expiresAt: now + freshForMs,
+        expiresAt: checkedAt + freshForMs,
         discardAfter: now + CACHE_RETENTION_MS,
         data,
       } satisfies LocalCacheRecord<T>);
@@ -272,13 +273,18 @@ export function readCommuteCache<T>(key: string) {
   return readCache<T>(COMMUTE_STORE, key);
 }
 
-export function writeCommuteCache<T>(key: string, data: T) {
+export function writeCommuteCache<T>(
+  key: string,
+  data: T,
+  checkedAt = Date.now(),
+) {
   return writeCache(
     COMMUTE_STORE,
     key,
     data,
     COMMUTE_CACHE_FRESH_MS,
     COMMUTE_CACHE_LIMIT,
+    checkedAt,
   );
 }
 
@@ -290,6 +296,31 @@ export function readCommunityCache<T>(key: string) {
   return readCache<T>(COMMUNITY_STORE, key);
 }
 
+export async function readCommunityHistory<T>(): Promise<
+  LocalCacheRecord<T>[]
+> {
+  if (!isLocalMemoryEnabled()) return [];
+  try {
+    const database = await openCacheDatabase();
+    try {
+      const records = (await requestResult(
+        database
+          .transaction(COMMUNITY_STORE, 'readonly')
+          .objectStore(COMMUNITY_STORE)
+          .getAll(),
+      )) as LocalCacheRecord<T>[];
+      return records
+        .filter((record) => record.discardAfter > Date.now())
+        .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt)
+        .slice(0, COMMUNITY_CACHE_LIMIT);
+    } finally {
+      database.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
 export function writeCommunityCache<T>(key: string, data: T) {
   // Geometry can be large; optional local memory must stay bounded by bytes too.
   if (JSON.stringify(data).length * 2 > 1_500_000) return Promise.resolve();
@@ -297,7 +328,7 @@ export function writeCommunityCache<T>(key: string, data: T) {
     COMMUNITY_STORE,
     key,
     data,
-    10 * 60_000,
+    24 * 60 * 60_000,
     COMMUNITY_CACHE_LIMIT,
   );
 }

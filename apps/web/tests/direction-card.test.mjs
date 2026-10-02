@@ -93,6 +93,6 @@ test('empty and failed directions remain visible, with distinct statuses and ret
     });
     assert.ok(html.includes(label));
     assert.doesNotMatch(html, /查看路线|最远已验证站/);
-    assert.equal(html.includes('重试此方向'), !confirmed);
+    assert.equal(html.includes('补查此方向'), !confirmed);
   }
 });

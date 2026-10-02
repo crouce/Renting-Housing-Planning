@@ -71,6 +71,7 @@ globalThis[Symbol.for('community.test.amap')] = async (path, params) => {
                     name: seed.lineName,
                     departure_stop: station,
                     arrival_stop: end,
+                    polyline: `${station.location};${end.location}`,
                   },
                 ],
               },
@@ -138,12 +139,35 @@ test('community API filters residential POIs, paginates, reuses search, verifies
     assert.equal(calls.at(-1).params.destination, anchor.location);
     assert.equal(calls.at(-1).params.time, '08-30');
     const after = calls.length;
+    const originalCheckedAt = result.checkedAt;
     result = await (await post(verify)).json();
     assert.equal(result.cached, true);
     assert.equal(calls.length, after);
     result = await (await post({ ...verify, budgetMinutes: 30 })).json();
     assert.equal(result.status, 'over_budget');
-    assert.equal(calls.length, after + 1);
+    assert.equal(
+      calls.length,
+      after,
+      'budget-only changes reuse raw timing evidence',
+    );
+    assert.equal(
+      result.checkedAt,
+      originalCheckedAt,
+      'cache reads do not renew the evidence clock',
+    );
+    result = await (await post({ ...verify, budgetMinutes: 40 })).json();
+    assert.equal(result.status, 'reachable');
+    assert.equal(calls.length, after);
+    assert.ok(result.geometry.length > 0);
+    await post({ ...search, refresh: true });
+    const afterPoiRefresh = calls.length;
+    result = await (await post(verify)).json();
+    assert.equal(result.cached, true);
+    assert.equal(
+      calls.length,
+      afterPoiRefresh,
+      'refreshing a POI list preserves route evidence',
+    );
     await post({ ...verify, departureTime: '09:30' });
     assert.equal(calls.at(-1).params.time, '09-30');
     failure = true;
@@ -151,7 +175,7 @@ test('community API filters residential POIs, paginates, reuses search, verifies
     assert.equal(result.status, 'error');
     assert.equal(result.totalSeconds, undefined);
     failure = false;
-    result = await (await post({ ...verify, refresh: true })).json();
+    result = await (await post(verify)).json();
     assert.equal(result.status, 'reachable');
   } finally {
     globalThis.setTimeout = realTimeout;

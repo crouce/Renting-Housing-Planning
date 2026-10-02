@@ -72,11 +72,7 @@ export function DirectionStatusCard({
         )}
         {unresolved && (
           <button type="button" disabled={disabled} onClick={onRetry}>
-            {busy
-              ? '正在核验…'
-              : direction.errorCount || direction.noRouteCount
-                ? '重试此方向'
-                : '继续核验此方向'}
+            {busy ? '正在补查…' : '补查此方向'}
           </button>
         )}
       </div>
@@ -97,9 +93,9 @@ export function DirectionStatusCard({
           </p>
         )}
         <p>
-          {direction.cached
-            ? '复用最近核验'
-            : `本次核验 ${direction.routeCheckCount} 次`}
+          本次新查 {direction.routeCheckCount} 次
+          {(direction.reusedCheckCount ?? 0) > 0 &&
+            ` · 复用 ${direction.reusedCheckCount} 条路线证据`}
         </p>
         {unresolved && (
           <p>

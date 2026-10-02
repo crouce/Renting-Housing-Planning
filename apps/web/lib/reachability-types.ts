@@ -16,6 +16,8 @@ export type DirectionSummary = {
   errorCount: number;
   noRouteCount: number;
   cached: boolean;
+  checkedAt?: number;
+  reusedCheckCount?: number;
   farthestRouteId: string | null;
   boardingStations: BoardingStation[];
   evidence: Array<{

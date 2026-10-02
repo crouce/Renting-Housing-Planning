@@ -7,6 +7,11 @@ import {
 } from '@/lib/community-core';
 import type { CommunityTransit } from '@/lib/community-core';
 import type { Community, CommunityVerification } from '@/lib/community-types';
+import {
+  classifyCommunity,
+  communityRouteKey,
+  ROUTE_FRESH_MS,
+} from '@/lib/cache-policy';
 
 type Poi = {
   id?: string;
@@ -24,6 +29,7 @@ type TransitResponse = {
 const poiCache = new BoundedCache<{
   pois: Omit<Community, 'seedIds'>[];
   hasMore: boolean;
+  checkedAt: number;
 }>(64, 1024 * 1024);
 const routeCache = new BoundedCache<CommunityVerification>(96, 4 * 1024 * 1024);
 let nextRequestAt = 0;
@@ -108,7 +114,11 @@ export async function POST(request: Request) {
               ? Math.max(0, Number(poi.distance))
               : 0,
           }));
-        value = { pois, hasMore: (data.pois?.length ?? 0) >= 20 };
+        value = {
+          pois,
+          hasMore: (data.pois?.length ?? 0) >= 20,
+          checkedAt: Date.now(),
+        };
         poiCache.set(key, value, 24 * 60 * 60_000);
       }
       return Response.json({
@@ -116,6 +126,7 @@ export async function POST(request: Request) {
         hasMore: value.hasMore,
         page,
         cached,
+        checkedAt: value.checkedAt,
       });
     } catch (error) {
       return Response.json(
@@ -154,22 +165,20 @@ export async function POST(request: Request) {
     !/^([01]\d|2[0-3]):[0-5]\d$/.test(departureTime)
   )
     return invalid('通勤条件或站点信息失效，请重新计算通勤圈。');
-  const key = JSON.stringify([
-    community.id,
-    community.location,
-    anchor.id,
-    anchor.location,
-    seed.id,
-    seed.lineId,
-    seed.lineName,
-    seed.stops,
-    seed.citycode,
-    budgetMinutes,
+  const key = communityRouteKey(
+    community,
+    anchor,
+    seed,
     departureDate,
     departureTime,
-  ]);
-  const cached = body.refresh ? undefined : routeCache.get(key);
-  if (cached) return Response.json({ ...cached, cached: true });
+  );
+  if (body.refresh) routeCache.delete(key);
+  const cached = routeCache.get(key);
+  if (cached)
+    return Response.json({
+      ...classifyCommunity(cached, budgetMinutes * 60),
+      cached: true,
+    });
   try {
     await pace();
     request.signal.throwIfAborted();
@@ -199,7 +208,7 @@ export async function POST(request: Request) {
       budgetMinutes * 60,
     );
     if (result.status === 'reachable' || result.status === 'over_budget')
-      routeCache.set(key, result, 10 * 60_000);
+      routeCache.set(key, result, ROUTE_FRESH_MS);
     return Response.json(result);
   } catch (error) {
     return Response.json({

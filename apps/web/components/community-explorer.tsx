@@ -1,10 +1,22 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MapPin, RefreshCw } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { MapPin } from 'lucide-react';
 import { formatDuration } from '@/lib/duration';
 import { mergeCommunities } from '@/lib/community-core';
-import { readCommunityCache, writeCommunityCache } from '@/lib/local-memory';
+import {
+  readCommunityCache,
+  readCommunityHistory,
+  writeCommunityCache,
+} from '@/lib/local-memory';
+import {
+  classifyCommunity,
+  communityRouteKey,
+  isRecent,
+  replaceStationCommunities,
+  seedIdentity,
+  ROUTE_FRESH_MS,
+} from '@/lib/cache-policy';
 import type {
   BoardingStation,
   Community,
@@ -15,7 +27,14 @@ import type {
 
 type PageState = Record<
   string,
-  { page: number; hasMore: boolean; failed?: boolean }
+  {
+    page: number;
+    hasMore: boolean;
+    failed?: boolean;
+    retryPage?: number;
+    refreshPending?: boolean;
+    checkedAt?: number;
+  }
 >;
 type SavedCommunities = {
   communities: Community[];
@@ -95,13 +114,14 @@ export function CommunityExplorer({
   const controllerRef = useRef<AbortController | null>(null);
   const selected = groups.filter((group) => selectedGroups.includes(group.id));
   const cacheKey = JSON.stringify([
-    'communities:v1',
+    'communities:v2',
     anchor,
-    budgetMinutes,
     departureDate,
     departureTime,
     radius,
-    selected.map((group) => group.seeds),
+    selected
+      .flatMap((group) => group.seeds.map(seedIdentity))
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
   ]);
   const seedsById = useMemo(
     () => new Map(seeds.map((seed) => [seed.id, seed])),
@@ -112,7 +132,7 @@ export function CommunityExplorer({
     const now = Date.now();
     const nextExpiry = Math.min(
       ...Object.values(verifications)
-        .map((result) => result.checkedAt + 10 * 60_000)
+        .map((result) => result.checkedAt + ROUTE_FRESH_MS)
         .filter((expiry) => expiry > now),
     );
     if (!Number.isFinite(nextExpiry)) return;
@@ -125,10 +145,22 @@ export function CommunityExplorer({
           communities: onlyWithinBudget
             ? communities.filter((community) => {
                 const seedId = choices[community.id] ?? community.seedIds[0];
-                const result = verifications[`${community.id}:${seedId}`];
+                const seed = seedsById.get(seedId);
+                const raw = seed
+                  ? verifications[
+                      communityRouteKey(
+                        community,
+                        anchor,
+                        seed,
+                        departureDate,
+                        departureTime,
+                      )
+                    ]
+                  : undefined;
+                const result =
+                  raw && classifyCommunity(raw, budgetMinutes * 60);
                 return (
-                  result?.status === 'reachable' &&
-                  Date.now() - result.checkedAt < 10 * 60_000
+                  result?.status === 'reachable' && isRecent(result.checkedAt)
                 );
               })
             : communities,
@@ -144,6 +176,11 @@ export function CommunityExplorer({
     choices,
     onlyWithinBudget,
     onMapChange,
+    seedsById,
+    anchor,
+    departureDate,
+    departureTime,
+    budgetMinutes,
   ]);
 
   useEffect(() => {
@@ -161,18 +198,35 @@ export function CommunityExplorer({
     setActiveId(undefined);
     onMapChange({ communities: [] });
     if (remember)
-      void readCommunityCache<SavedCommunities>(cacheKey).then((record) => {
-        if (!current || !record || controllerRef.current) return;
-        const fresh = record.expiresAt > Date.now();
+      void Promise.all([
+        readCommunityCache<SavedCommunities>(cacheKey),
+        readCommunityHistory<SavedCommunities>(),
+      ]).then(([record, history]) => {
+        if (!current || controllerRef.current) return;
+        // Reuse matching routes even when the chosen station batch or radius changes.
+        // Full route keys prevent reuse after coordinates, lines or time change.
+        const proofs: Record<string, CommunityVerification> = {};
+        for (const saved of history)
+          for (const [key, result] of Object.entries(
+            saved.data.verifications,
+          )) {
+            if (!proofs[key] || proofs[key].checkedAt < result.checkedAt)
+              proofs[key] = result;
+          }
+        setVerifications(proofs);
+        if (!record) return;
+        const fresh = Object.values(record.data.pages).every(
+          (page) =>
+            page.checkedAt && Date.now() - page.checkedAt < 24 * 60 * 60_000,
+        );
         setCommunities(record.data.communities);
         setPages(record.data.pages);
         setChoices(record.data.choices);
-        setVerifications(fresh ? record.data.verifications : {});
         setSearched(true);
         setMessage(
           fresh
-            ? '已恢复本机小区记录；通勤核验有效期 10 分钟。'
-            : '已恢复历史小区记录；通勤结果已过期，请重新核验或更新小区。',
+            ? '近期结果：已恢复小区名单；路线证据独立保鲜 10 分钟，调整预算会重新判断。'
+            : '历史结果：小区名单需要更新；仍有效的路线核验会保留。',
         );
         onMapChange({ communities: record.data.communities });
       });
@@ -182,22 +236,52 @@ export function CommunityExplorer({
     };
   }, [cacheKey, remember, memoryEpoch, onMapChange]);
 
-  const save = useCallback(
-    (data: SavedCommunities) => {
-      if (remember) void writeCommunityCache(cacheKey, data);
-    },
-    [cacheKey, remember],
-  );
+  function save(data: SavedCommunities) {
+    if (remember) {
+      const used = new Set(
+        data.communities.flatMap((community) =>
+          community.seedIds.flatMap((id) => {
+            const seed = seedsById.get(id);
+            return seed
+              ? [
+                  communityRouteKey(
+                    community,
+                    anchor,
+                    seed,
+                    departureDate,
+                    departureTime,
+                  ),
+                ]
+              : [];
+          }),
+        ),
+      );
+      void writeCommunityCache(cacheKey, {
+        ...data,
+        verifications: Object.fromEntries(
+          Object.entries(data.verifications).filter(([key]) => used.has(key)),
+        ),
+      });
+    }
+  }
   function chosenSeed(community: Community) {
     return seedsById.get(choices[community.id] ?? community.seedIds[0]);
   }
   function resultFor(community: Community) {
     const seed = chosenSeed(community);
     const result = seed
-      ? verifications[`${community.id}:${seed.id}`]
+      ? verifications[
+          communityRouteKey(
+            community,
+            anchor,
+            seed,
+            departureDate,
+            departureTime,
+          )
+        ]
       : undefined;
-    return result && Date.now() - result.checkedAt < 10 * 60_000
-      ? result
+    return result && isRecent(result.checkedAt)
+      ? classifyCommunity(result, budgetMinutes * 60)
       : undefined;
   }
   async function api<T>(body: object, controller: AbortController): Promise<T> {
@@ -220,16 +304,27 @@ export function CommunityExplorer({
     controllerRef.current = controller;
     setErrors([]);
     setMessage('');
-    let found = more ? communities : [];
-    const newPages = more ? { ...pages } : ({} as PageState);
-    const newVerifications = refresh ? {} : verifications;
-    if (refresh) setVerifications({});
+    let found = communities;
+    const newPages = { ...pages };
+    const newVerifications = verifications;
     const failures: string[] = [];
     for (const [index, group] of selected.entries()) {
       const previous = newPages[group.id];
       if (failedOnly && !previous?.failed) continue;
-      if (more && previous && (!previous.hasMore || previous.page >= 3))
+      if (
+        more &&
+        !failedOnly &&
+        previous &&
+        (!previous.hasMore || previous.page >= 3)
+      )
         continue;
+      const queryPage = failedOnly
+        ? (previous?.retryPage ?? 1)
+        : more
+          ? (previous?.page ?? 0) + 1
+          : 1;
+      const forceList =
+        refresh || Boolean(failedOnly && previous?.refreshPending);
       setBusy(
         `搜索站点 ${index + 1}/${selected.length}：${group.station.name}`,
       );
@@ -240,14 +335,28 @@ export function CommunityExplorer({
             station: group.station,
             seedIds: group.seeds.map((seed) => seed.id),
             radius,
-            page: more ? (previous?.page ?? 0) + 1 : 1,
-            refresh,
+            page: queryPage,
+            refresh: forceList,
           },
           controller,
         );
         if (controller.signal.aborted) return;
-        found = mergeCommunities(found, data.communities);
-        newPages[group.id] = { page: data.page, hasMore: data.hasMore };
+        found =
+          queryPage > 1
+            ? mergeCommunities(found, data.communities)
+            : replaceStationCommunities(
+                found,
+                data.communities,
+                group.seeds.map((seed) => seed.id),
+              );
+        newPages[group.id] = {
+          page: data.page,
+          hasMore: data.hasMore,
+          checkedAt:
+            queryPage > 1
+              ? Math.min(previous?.checkedAt ?? 0, data.checkedAt ?? 0)
+              : (data.checkedAt ?? 0),
+        };
         setCommunities(found);
         setPages({ ...newPages });
         setSearched(true);
@@ -266,6 +375,8 @@ export function CommunityExplorer({
         newPages[group.id] = {
           ...(previous ?? { page: 0, hasMore: true }),
           failed: true,
+          retryPage: queryPage,
+          refreshPending: forceList,
         };
       }
     }
@@ -277,6 +388,10 @@ export function CommunityExplorer({
     setBusy('');
     setSearched(true);
     setActiveId(undefined);
+    if (refresh)
+      setMessage(
+        '小区名单已更新；同位置、同线路且仍在 10 分钟内的核验已保留。失败站点继续使用原名单。',
+      );
     save({
       communities: found,
       pages: newPages,
@@ -323,7 +438,9 @@ export function CommunityExplorer({
         };
       }
       if (controller.signal.aborted) return;
-      updated[`${community.id}:${seed.id}`] = result;
+      updated[
+        communityRouteKey(community, anchor, seed, departureDate, departureTime)
+      ] = result;
       setVerifications({ ...updated });
       save({ communities, pages, verifications: updated, choices });
       if (items.length === 1) {
@@ -449,15 +566,17 @@ export function CommunityExplorer({
               搜索小区
             </button>
             {searched && (
-              <button
-                type="button"
-                aria-label="刷新小区记录"
-                title="刷新小区记录并清除本批核验"
-                disabled={Boolean(busy) || disabled}
-                onClick={() => void search(false, true)}
-              >
-                <RefreshCw size={16} />
-              </button>
+              <details className="update-menu">
+                <summary>更多更新</summary>
+                <button
+                  type="button"
+                  disabled={Boolean(busy) || disabled}
+                  onClick={() => void search(false, true)}
+                >
+                  更新小区名单（保留有效核验）
+                </button>
+                <small>只更新名单；已核验路线按各自时间失效。</small>
+              </details>
             )}
           </div>
           {busy && (
@@ -490,7 +609,7 @@ export function CommunityExplorer({
                 disabled={Boolean(busy) || disabled}
                 onClick={() => void search(true, false, true)}
               >
-                重试未完成的搜索
+                补查未完成的搜索
               </button>
             </div>
           )}
@@ -527,7 +646,7 @@ export function CommunityExplorer({
                   disabled={Boolean(busy) || disabled}
                   onClick={() => void verify(pending)}
                 >
-                  核验接下来 {pending.length} 个小区的完整通勤
+                  补查未完成（本批 {pending.length} 个小区）
                 </button>
               )}
               {visible.length === 0 && (
@@ -543,6 +662,17 @@ export function CommunityExplorer({
                 {visible.map((community) => {
                   const result = resultFor(community);
                   const seed = chosenSeed(community);
+                  const historical =
+                    seed &&
+                    verifications[
+                      communityRouteKey(
+                        community,
+                        anchor,
+                        seed,
+                        departureDate,
+                        departureTime,
+                      )
+                    ];
                   return (
                     <article
                       className={`community-card${activeId === community.id ? ' is-active' : ''}`}
@@ -582,6 +712,13 @@ export function CommunityExplorer({
                           </span>
                         </summary>
                         <div className="community-card-detail-body">
+                          <p className="community-hint">
+                            {result
+                              ? `近期结果 · ${new Date(result.checkedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 核验`
+                              : historical
+                                ? '历史结果 · 需要更新，暂不计入预算内'
+                                : '需要更新 · 尚未核验'}
+                          </p>
                           <p>{community.address || '高德暂无详细地址'}</p>
                           <small>
                             距所选站点最近直线{' '}
@@ -691,7 +828,12 @@ export function CommunityExplorer({
                                 void verify([community], Boolean(result))
                               }
                             >
-                              {result ? '重新核验' : '核验通勤'}
+                              {result &&
+                              ['reachable', 'over_budget'].includes(
+                                result.status,
+                              )
+                                ? '更新此路线'
+                                : '补查此小区'}
                             </button>
                           </div>
                         </div>

@@ -22,6 +22,7 @@ export type CommunitySearch = {
   hasMore: boolean;
   page: number;
   cached: boolean;
+  checkedAt?: number;
 };
 export type CommunityGeometry = {
   mode: 'WALK' | 'TRANSIT';
