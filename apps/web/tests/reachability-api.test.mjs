@@ -167,6 +167,20 @@ test('POST preserves independent precision, strict direct routes, reuse, and tar
     );
     assert.deepEqual(own, summary(alone));
     assert.equal(multiple.directions.to.stations.length, 10);
+    const boarding = summary(multiple).flatMap(
+      (direction) => direction.boardingStations,
+    );
+    assert.ok(
+      boarding.length > 10,
+      'retain verified intermediate stations, not only the farthest',
+    );
+    for (const candidate of boarding) {
+      assert.equal(candidate.station.id, candidate.stops[0].id);
+      assert.ok(candidate.stops.length >= 2);
+      assert.ok(
+        candidate.transitSeconds + candidate.companyWalkSeconds <= 35 * 60,
+      );
+    }
     for (const route of multiple.directions.to.stations) {
       assert.equal(route.segmentCount, 1);
       assert.equal(

@@ -1,4 +1,5 @@
 import type { DirectionStatus } from './reachability-core';
+import type { BoardingStation } from './community-types';
 
 export type DirectionSummary = {
   id: string;
@@ -16,6 +17,7 @@ export type DirectionSummary = {
   noRouteCount: number;
   cached: boolean;
   farthestRouteId: string | null;
+  boardingStations: BoardingStation[];
   evidence: Array<{
     stationName: string;
     status: DirectionStatus;

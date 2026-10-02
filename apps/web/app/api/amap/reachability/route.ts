@@ -736,7 +736,7 @@ async function evaluateLineDirection(
   resume: boolean,
 ): Promise<DirectionEvaluation> {
   const key = JSON.stringify([
-    'verified-directions-v1',
+    'verified-directions-v2',
     anchorLocation,
     context.id,
     context.requestedLineName,
@@ -807,6 +807,55 @@ async function evaluateLineDirection(
         .length,
       cached: false,
       farthestRouteId: best?.logicalId ?? null,
+      boardingStations: observations.flatMap((observation) => {
+        if (
+          observation.status !== 'reachable' ||
+          observation.durationSeconds === undefined
+        )
+          return [];
+        const candidate = context.candidates[observation.index];
+        const stops = (context.line.busstops ?? []).slice(
+          candidate.stopIndex,
+          context.accessStopIndex + 1,
+        );
+        if (
+          !stops.every(
+            (stop) =>
+              stop.id &&
+              stop.name &&
+              stop.location &&
+              locationPattern.test(stop.location),
+          )
+        )
+          return [];
+        return [
+          {
+            id: candidate.logicalId,
+            directionId: context.id,
+            station: {
+              id: candidate.id,
+              name: candidate.name,
+              location: candidate.location,
+            },
+            accessStation: {
+              id: context.accessStation.id,
+              name: context.accessStation.name,
+              location: context.accessStation.location,
+            },
+            citycode: candidate.citycode,
+            lineId: context.line.id!,
+            lineName: context.line.name!,
+            directionLabel: context.directionLabel,
+            stops: stops.map((stop) => ({
+              id: stop.id!,
+              name: stop.name!,
+              location: stop.location!,
+            })),
+            transitSeconds: observation.durationSeconds,
+            companyWalkSeconds: context.accessStation.walkingDurationSeconds,
+          },
+        ];
+      }),
       evidence: context.candidates.map((candidate, index) => {
         const checked = observations.find((item) => item.index === index);
         return {

@@ -1964,6 +1964,234 @@ input {
   white-space: nowrap;
 }
 
+.community-section {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+.community-section h2 {
+  font-size: 18px;
+  margin: 8px 0;
+}
+.community-hint,
+.community-disclaimer {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #63736c;
+  margin: 10px 0;
+}
+.community-disclaimer {
+  padding: 12px;
+  background: #f0f3ef;
+  border-radius: 10px;
+}
+.community-station-picker {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.community-station-picker summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.community-station-picker > div {
+  max-height: 230px;
+  overflow: auto;
+  margin-top: 8px;
+}
+.community-station-picker label {
+  display: flex;
+  gap: 9px;
+  align-items: start;
+  padding: 8px 0;
+}
+.community-station-picker small {
+  display: block;
+  color: #63736c;
+  margin-top: 3px;
+}
+.community-section input[type='checkbox'] {
+  accent-color: #187e64;
+  flex-shrink: 0;
+}
+.community-controls,
+.community-progress,
+.community-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.community-controls label {
+  flex: 1;
+  font-size: 12px;
+  min-width: 90px;
+}
+.community-section select {
+  display: block;
+  max-width: 100%;
+  width: 100%;
+  border: 1px solid #d8e1dc;
+  padding: 8px;
+  border-radius: 7px;
+  background: #fff;
+  font-size: 12px;
+  margin-top: 5px;
+  color: #264b3e;
+}
+.community-section button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 34px;
+  border: 1px solid #c2d7cb;
+  background: #fff;
+  color: #1d5947;
+  border-radius: 7px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.community-section button:hover:not(:disabled) {
+  background: #eaf5ee;
+}
+.community-section button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.community-progress {
+  justify-content: space-between;
+  background: #eaf3ee;
+  padding: 10px;
+  border-radius: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.community-summary {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  margin: 18px 0 12px;
+}
+.community-summary label {
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.community-batch {
+  width: 100%;
+  margin-bottom: 12px;
+}
+.community-list {
+  display: grid;
+  gap: 12px;
+}
+.community-card {
+  min-width: 0;
+  border: 1px solid #dce5df;
+  background: #fff;
+  padding: 14px;
+  border-radius: 12px;
+}
+.community-card.is-active {
+  border-color: #187e64;
+  box-shadow: inset 3px 0 #187e64;
+  background: #f2f9f5;
+}
+.community-card-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.community-card h3 {
+  font-size: 15px;
+  line-height: 1.5;
+  margin: 0;
+}
+.community-card p,
+.community-card > small {
+  font-size: 12px;
+  color: #64746b;
+  line-height: 1.6;
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+.community-status {
+  flex-shrink: 0;
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #eef1ee;
+  color: #59695f;
+}
+.community-status.is-reachable {
+  color: #176549;
+  background: #e5f3e8;
+}
+.community-status.is-over_budget,
+.community-status.is-error {
+  color: #a34829;
+  background: #fff0e6;
+}
+.community-route-choice {
+  display: block;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.community-breakdown {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  margin: 10px 0;
+  background: #f1f6f2;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.community-breakdown span,
+.community-breakdown small {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #5b6d63;
+}
+.community-card-actions {
+  justify-content: space-between;
+  margin-top: 12px;
+}
+.community-error {
+  padding: 10px;
+  background: #fff5eb;
+  color: #9a4529;
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 10px;
+}
+.community-map-pin {
+  display: inline-block;
+  padding: 5px 8px;
+  color: #fff;
+  background: #8061ab;
+  border: 2px solid #fff;
+  border-radius: 8px 8px 8px 0;
+  box-shadow: 0 2px 6px #0003;
+  font-weight: 700;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.community-map-pin.is-active {
+  background: #187e64;
+  font-size: 14px;
+  padding: 7px 10px;
+  z-index: 180;
+}
+.legend-community {
+  background: #8061ab;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

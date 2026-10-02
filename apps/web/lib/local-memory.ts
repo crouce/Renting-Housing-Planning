@@ -28,9 +28,11 @@ type PlannerMemory = {
 const MEMORY_KEY = 'commute-radius:planner-memory:v1';
 const MEMORY_ENABLED_KEY = 'commute-radius:memory-enabled';
 const CACHE_DATABASE = 'commute-radius-local-memory';
-const CACHE_DATABASE_VERSION = 1;
+const CACHE_DATABASE_VERSION = 2;
 const STATION_STORE = 'station-cache';
 const COMMUTE_STORE = 'commute-cache';
+const COMMUNITY_STORE = 'community-cache';
+export const COMMUNITY_CACHE_LIMIT = 3;
 export const RECENT_PLACE_LIMIT = 5;
 export const STATION_CACHE_LIMIT = 6;
 export const STATION_CACHE_FRESH_MS = 24 * 60 * 60 * 1000;
@@ -122,7 +124,7 @@ function openCacheDatabase() {
     );
     request.onupgradeneeded = () => {
       const database = request.result;
-      for (const storeName of [STATION_STORE, COMMUTE_STORE]) {
+      for (const storeName of [STATION_STORE, COMMUTE_STORE, COMMUNITY_STORE]) {
         if (!database.objectStoreNames.contains(storeName)) {
           const store = database.createObjectStore(storeName, {
             keyPath: 'key',
@@ -282,6 +284,22 @@ export function writeCommuteCache<T>(key: string, data: T) {
 
 export function updateCommuteCache<T>(key: string, update: (data: T) => T) {
   return updateCache(COMMUTE_STORE, key, update);
+}
+
+export function readCommunityCache<T>(key: string) {
+  return readCache<T>(COMMUNITY_STORE, key);
+}
+
+export function writeCommunityCache<T>(key: string, data: T) {
+  // Geometry can be large; optional local memory must stay bounded by bytes too.
+  if (JSON.stringify(data).length * 2 > 1_500_000) return Promise.resolve();
+  return writeCache(
+    COMMUNITY_STORE,
+    key,
+    data,
+    10 * 60_000,
+    COMMUNITY_CACHE_LIMIT,
+  );
 }
 
 export async function clearAllLocalMemory() {

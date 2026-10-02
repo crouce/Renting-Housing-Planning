@@ -27,6 +27,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
 import { DirectionStatusCard } from '@/components/direction-status-card';
+import {
+  CommunityExplorer,
+  type CommunityMapSelection,
+} from '@/components/community-explorer';
 import { mergeDirectionResult } from '@/lib/merge-direction-result';
 import { formatDuration } from '@/lib/duration';
 import type {
@@ -270,7 +274,7 @@ function commuteMemoryKey(
   selectedLineKeys: string[],
 ) {
   return [
-    'commute:v8',
+    'commute:v9',
     place.location,
     budget,
     departureDate,
@@ -356,6 +360,8 @@ export function CommutePlanner() {
   const amapRef = useRef<AMapNamespace | null>(null);
   const overlaysRef = useRef<AMapOverlay[]>([]);
   const anchorMarkerRef = useRef<AMapMarker | null>(null);
+  const communityMapActiveRef = useRef(false);
+  const [mapView, setMapView] = useState<'transit' | 'communities'>('transit');
   const restoredSelectionRef = useRef<{
     stationIds: string[];
     lineKeys: string[];
@@ -681,6 +687,13 @@ export function CommutePlanner() {
     setActiveRouteId(null);
     setReachabilityError('');
     setCommuteMemory(null);
+    communityMapActiveRef.current = false;
+    setMapView('transit');
+    clearMapOverlays();
+    if (mapRef.current && anchorMarkerRef.current) {
+      anchorMarkerRef.current.setMap(mapRef.current);
+      overlaysRef.current.push(anchorMarkerRef.current);
+    }
   }
 
   function resetNearbyStations() {
@@ -798,6 +811,8 @@ export function CommutePlanner() {
       const AMap = amapRef.current;
       const map = mapRef.current;
       if (!AMap || !map) return;
+      communityMapActiveRef.current = false;
+      setMapView('transit');
       clearMapOverlays();
       const anchor = anchorMarkerRef.current;
       if (anchor) {
@@ -900,6 +915,8 @@ export function CommutePlanner() {
       const map = mapRef.current;
       if (!AMap || !map) return;
 
+      communityMapActiveRef.current = false;
+      setMapView('transit');
       clearMapOverlays();
       const focusOverlays: AMapOverlay[] = [];
       const anchor = anchorMarkerRef.current;
@@ -1073,6 +1090,94 @@ export function CommutePlanner() {
       map.setFitView(focusOverlays, false, [90, 70, 90, 430]);
     },
     [clearMapOverlays, selectedStationIds, stations],
+  );
+
+  const drawCommunityMap = useCallback(
+    (selection: CommunityMapSelection) => {
+      const AMap = amapRef.current;
+      const map = mapRef.current;
+      if (
+        !AMap ||
+        !map ||
+        (!selection.communities.length && !communityMapActiveRef.current)
+      )
+        return;
+      clearMapOverlays();
+      communityMapActiveRef.current = selection.communities.length > 0;
+      setMapView(selection.communities.length ? 'communities' : 'transit');
+      const focus: AMapOverlay[] = [];
+      const anchor = anchorMarkerRef.current;
+      if (anchor) {
+        anchor.setMap(map);
+        overlaysRef.current.push(anchor);
+        focus.push(anchor);
+      }
+      for (const [index, community] of selection.communities.entries()) {
+        const active = community.id === selection.activeId;
+        // Keep the selected door-to-door path readable in dense neighbourhoods.
+        if (selection.verification?.geometry.length && !active) continue;
+        const content = document.createElement('span');
+        content.className = `community-map-pin${active ? ' is-active' : ''}`;
+        content.textContent = active ? community.name : `居${index + 1}`;
+        const marker = new AMap.Marker({
+          map,
+          position: parseLocation(community.location),
+          content,
+          title: community.name,
+          anchor: 'bottom-center',
+          zIndex: active ? 180 : 90,
+        });
+        overlaysRef.current.push(marker);
+        if (active || !selection.activeId) focus.push(marker);
+      }
+      const result = selection.verification;
+      for (const segment of result?.geometry ?? []) {
+        const line = new AMap.Polyline({
+          map,
+          path: segment.path,
+          strokeColor:
+            segment.mode === 'WALK'
+              ? '#b37425'
+              : result?.status === 'over_budget'
+                ? '#d75a3b'
+                : '#187e64',
+          strokeWeight: segment.mode === 'WALK' ? 5 : 7,
+          strokeStyle: segment.mode === 'WALK' ? 'dashed' : 'solid',
+          isOutline: true,
+          outlineColor: '#fff',
+          zIndex: 60,
+          showDir: segment.mode === 'TRANSIT',
+        });
+        overlaysRef.current.push(line);
+        focus.push(line);
+        for (const stop of segment.stops) {
+          const content = document.createElement('div');
+          content.className = 'route-stop-marker';
+          const dot = document.createElement('i');
+          const label = document.createElement('span');
+          label.textContent = stop.name;
+          content.appendChild(dot);
+          content.appendChild(label);
+          const marker = new AMap.Marker({
+            map,
+            position: parseLocation(stop.location),
+            content,
+            title: stop.name,
+            anchor: 'bottom-center',
+            zIndex: 100,
+          });
+          overlaysRef.current.push(marker);
+        }
+      }
+      if (focus.length)
+        map.setFitView(focus, false, [
+          90,
+          60,
+          90,
+          window.innerWidth > 820 ? 430 : 60,
+        ]);
+    },
+    [clearMapOverlays],
   );
 
   const applyReachabilityResult = useCallback(
@@ -1335,6 +1440,16 @@ export function CommutePlanner() {
         (station) => station.logicalId === activeRouteId,
       ) ?? reachability.directions.to.farthest)
     : null;
+  const communitySeeds = useMemo(
+    () =>
+      reachability?.directions.to.accessRoutes.flatMap((group) =>
+        group.directions.flatMap(
+          (direction) => direction.boardingStations ?? [],
+        ),
+      ) ?? [],
+    [reachability],
+  );
+
   const accessRouteGroups = (
     reachability?.directions.to.accessRoutes ?? []
   ).map((group, index) => ({
@@ -1688,7 +1803,9 @@ export function CommutePlanner() {
               <Database aria-hidden="true" />
               <span>
                 <strong>仅在这台设备记住</strong>
-                <small>5 个地点 · 6 组站点 · 4 次通勤结果，不保存密钥</small>
+                <small>
+                  5 个地点 · 6 组站点 · 4 次通勤 · 3 组小区，不保存密钥
+                </small>
               </span>
               <button
                 type="button"
@@ -2317,6 +2434,30 @@ export function CommutePlanner() {
               <p className="sampling-note">
                 各方向使用相同的核验上限，先扣除工作地点到接驳站的步行时间，再核验指定线路的直达方案。达到上限时保留已验证可达站，剩余站点可继续核验；接口失败不会被判为超时。点击路线可在地图上高亮。
               </p>
+              {selectedPlace && (
+                <CommunityExplorer
+                  key={JSON.stringify([
+                    selectedPlace.id,
+                    budget,
+                    departureDate,
+                    departureTime,
+                    communitySeeds.map((seed) => [
+                      seed.id,
+                      seed.transitSeconds,
+                      seed.companyWalkSeconds,
+                    ]),
+                  ])}
+                  seeds={communitySeeds}
+                  anchor={selectedPlace}
+                  budgetMinutes={budget}
+                  departureDate={departureDate}
+                  departureTime={departureTime}
+                  remember={rememberLocally}
+                  memoryEpoch={memoryClearNonce}
+                  disabled={Boolean(retryingDirectionId)}
+                  onMapChange={drawCommunityMap}
+                />
+              )}
             </div>
           )}
         </aside>
@@ -2357,7 +2498,16 @@ export function CommutePlanner() {
               <i className="legend-bus" />
               公交站
             </span>
-            {reachabilityState === 'ready' && (
+            {mapView === 'communities' && (
+              <>
+                <span>
+                  <i className="legend-community" />
+                  住宅小区
+                </span>
+                <span>虚线：步行 · 实线：公共交通</span>
+              </>
+            )}
+            {reachabilityState === 'ready' && mapView === 'transit' && (
               <>
                 <span>
                   <i className="legend-farthest" />
@@ -2384,9 +2534,13 @@ export function CommutePlanner() {
           <div className="map-context-card">
             <small>当前计划</small>
             <strong>
-              {budget} 分钟 · 工作日 {departureTime}
+              {budget} 分钟 · {departureDate} {departureTime}
             </strong>
-            <span>住所 → 工作地点，单向路线核验</span>
+            <span>
+              {mapView === 'communities'
+                ? '小区 → 工作地点，门到门通勤核验'
+                : '住所 → 工作地点，单向路线核验'}
+            </span>
           </div>
         </div>
       </section>
