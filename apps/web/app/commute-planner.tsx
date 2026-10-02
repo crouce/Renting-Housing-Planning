@@ -1167,15 +1167,12 @@ export function CommutePlanner() {
             zIndex: 100,
           });
           overlaysRef.current.push(marker);
+          focus.push(marker);
         }
       }
       if (focus.length)
-        map.setFitView(focus, false, [
-          90,
-          60,
-          90,
-          window.innerWidth > 820 ? 430 : 60,
-        ]);
+        // The sidebar is outside the map; reserve equal padding inside its own viewport.
+        map.setFitView(focus, false, [100, 100, 100, 100]);
     },
     [clearMapOverlays],
   );
