@@ -1,3 +1,5 @@
+import { COLLECTION_KEY } from './community-collection';
+
 export type RememberedPlace = {
   id: string;
   name: string;
@@ -335,6 +337,11 @@ export function writeCommunityCache<T>(key: string, data: T) {
 
 export async function clearAllLocalMemory() {
   clearPlannerMemory();
+  try {
+    window.localStorage.removeItem(COLLECTION_KEY);
+  } catch {
+    /* Storage is optional. */
+  }
   if (typeof window === 'undefined' || !window.indexedDB) return;
   await new Promise<void>((resolve) => {
     const request = window.indexedDB.deleteDatabase(CACHE_DATABASE);

@@ -5,6 +5,18 @@ import { MapPin } from 'lucide-react';
 import { formatDuration } from '@/lib/duration';
 import { mergeCommunities } from '@/lib/community-core';
 import {
+  walkingStatus,
+  selectedVerificationBatch,
+  toggleCommunitySelection,
+  COMMUNITY_BATCH_LIMIT,
+  type WalkingLimits,
+} from '@/lib/community-selection';
+import {
+  communityChoiceKey,
+  makeFavorite,
+  type Favorite,
+} from '@/lib/community-collection';
+import {
   readCommunityCache,
   readCommunityHistory,
   writeCommunityCache,
@@ -58,6 +70,11 @@ export function CommunityExplorer({
   memoryEpoch,
   disabled,
   onMapChange,
+  favorites,
+  ignored,
+  onFavorite,
+  onRemoveFavorite,
+  onIgnore,
 }: {
   seeds: BoardingStation[];
   anchor: TransitStop;
@@ -68,6 +85,11 @@ export function CommunityExplorer({
   memoryEpoch: number;
   disabled: boolean;
   onMapChange: (selection: CommunityMapSelection) => void;
+  favorites: Favorite[];
+  ignored: string[];
+  onFavorite: (item: Favorite, onlyIfSaved?: boolean) => void;
+  onRemoveFavorite: (id: string) => void;
+  onIgnore: (id: string, ignored: boolean) => void;
 }) {
   const groups = useMemo(() => {
     const grouped = new Map<
@@ -110,6 +132,13 @@ export function CommunityExplorer({
   const [searched, setSearched] = useState(false);
   const [onlyWithinBudget, setOnlyWithinBudget] = useState(false);
   const [activeId, setActiveId] = useState<string>();
+  const [checkedIds, setCheckedIds] = useState<string[]>([]);
+  const [showIgnored, setShowIgnored] = useState(false);
+  const [walkingLimits, setWalkingLimits] = useState<WalkingLimits>({
+    homeMinutes: 0,
+    totalMinutes: 0,
+  });
+  const [walkingFilter, setWalkingFilter] = useState('all');
   const [expiryTick, setExpiryTick] = useState(0);
   const controllerRef = useRef<AbortController | null>(null);
   const selected = groups.filter((group) => selectedGroups.includes(group.id));
@@ -140,48 +169,11 @@ export function CommunityExplorer({
       () => {
         setExpiryTick((value) => value + 1);
         setActiveId(undefined);
-        // Expired proofs must disappear from the map as well as the cards.
-        onMapChange({
-          communities: onlyWithinBudget
-            ? communities.filter((community) => {
-                const seedId = choices[community.id] ?? community.seedIds[0];
-                const seed = seedsById.get(seedId);
-                const raw = seed
-                  ? verifications[
-                      communityRouteKey(
-                        community,
-                        anchor,
-                        seed,
-                        departureDate,
-                        departureTime,
-                      )
-                    ]
-                  : undefined;
-                const result =
-                  raw && classifyCommunity(raw, budgetMinutes * 60);
-                return (
-                  result?.status === 'reachable' && isRecent(result.checkedAt)
-                );
-              })
-            : communities,
-        });
       },
       nextExpiry - now + 10,
     );
     return () => window.clearTimeout(timer);
-  }, [
-    verifications,
-    expiryTick,
-    communities,
-    choices,
-    onlyWithinBudget,
-    onMapChange,
-    seedsById,
-    anchor,
-    departureDate,
-    departureTime,
-    budgetMinutes,
-  ]);
+  }, [verifications, expiryTick]);
 
   useEffect(() => {
     controllerRef.current?.abort();
@@ -191,12 +183,13 @@ export function CommunityExplorer({
     setPages({});
     setVerifications({});
     setChoices({});
+    setCheckedIds([]);
     setErrors([]);
     setBusy('');
     setSearched(false);
     setMessage('');
     setActiveId(undefined);
-    onMapChange({ communities: [] });
+
     if (remember)
       void Promise.all([
         readCommunityCache<SavedCommunities>(cacheKey),
@@ -228,7 +221,6 @@ export function CommunityExplorer({
             ? '近期结果：已恢复小区名单；路线证据独立保鲜 10 分钟，调整预算会重新判断。'
             : '历史结果：小区名单需要更新；仍有效的路线核验会保留。',
         );
-        onMapChange({ communities: record.data.communities });
       });
     return () => {
       current = false;
@@ -360,7 +352,7 @@ export function CommunityExplorer({
         setCommunities(found);
         setPages({ ...newPages });
         setSearched(true);
-        onMapChange({ communities: found });
+
         save({
           communities: found,
           pages: { ...newPages },
@@ -400,6 +392,20 @@ export function CommunityExplorer({
     });
   }
   async function verify(items: Community[], refresh = false) {
+    if (disabled || busy) return;
+    // Single and batch paths share the same exclusion, limit, and freshness guard.
+    items = items
+      .filter((item) => !ignored.includes(communityChoiceKey(anchor, item)))
+      .slice(0, COMMUNITY_BATCH_LIMIT);
+    if (!refresh)
+      items = items.filter(
+        (item) =>
+          !['reachable', 'over_budget'].includes(resultFor(item)?.status ?? ''),
+      );
+    if (!items.length) {
+      setMessage('所选小区已有有效核验，无需重复请求。');
+      return;
+    }
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -442,14 +448,22 @@ export function CommunityExplorer({
         communityRouteKey(community, anchor, seed, departureDate, departureTime)
       ] = result;
       setVerifications({ ...updated });
+      onFavorite(
+        makeFavorite(
+          community,
+          anchor,
+          seed,
+          departureDate,
+          departureTime,
+          result,
+        ),
+        true,
+      );
+      if (['reachable', 'over_budget'].includes(result.status))
+        setCheckedIds((ids) => ids.filter((id) => id !== community.id));
       save({ communities, pages, verifications: updated, choices });
       if (items.length === 1) {
         setActiveId(community.id);
-        onMapChange({
-          communities,
-          activeId: community.id,
-          verification: result,
-        });
       }
     }
     if (!controller.signal.aborted) {
@@ -459,26 +473,98 @@ export function CommunityExplorer({
       );
     }
   }
-  const sorted = [...communities].sort(
-    (a, b) =>
-      (resultFor(a)?.status === 'reachable' ? 0 : 1) -
-        (resultFor(b)?.status === 'reachable' ? 0 : 1) ||
-      (resultFor(a)?.totalSeconds ?? Infinity) -
-        (resultFor(b)?.totalSeconds ?? Infinity) ||
-      a.distanceMeters - b.distanceMeters,
+  const sorted = useMemo(
+    () =>
+      [...communities].sort(
+        (a, b) =>
+          (resultFor(a)?.status === 'reachable' ? 0 : 1) -
+            (resultFor(b)?.status === 'reachable' ? 0 : 1) ||
+          (resultFor(a)?.totalSeconds ?? Infinity) -
+            (resultFor(b)?.totalSeconds ?? Infinity) ||
+          a.distanceMeters - b.distanceMeters,
+      ),
+    [
+      communities,
+      verifications,
+      choices,
+      seedsById,
+      budgetMinutes,
+      departureDate,
+      departureTime,
+      anchor,
+      expiryTick,
+    ],
   );
-  const visible = onlyWithinBudget
-    ? sorted.filter((item) => resultFor(item)?.status === 'reachable')
-    : sorted;
+  const visible = useMemo(
+    () =>
+      sorted.filter((item) => {
+        if (!showIgnored && ignored.includes(communityChoiceKey(anchor, item)))
+          return false;
+        if (onlyWithinBudget && resultFor(item)?.status !== 'reachable')
+          return false;
+        const walk = walkingStatus(resultFor(item), walkingLimits);
+        return (
+          walkingFilter === 'all' ||
+          walk === 'unlimited' ||
+          (walkingFilter === 'match' ? walk === 'match' : walk === 'pending')
+        );
+      }),
+    [
+      sorted,
+      onlyWithinBudget,
+      walkingLimits,
+      walkingFilter,
+      ignored,
+      showIgnored,
+      anchor,
+    ],
+  );
   const within = communities.filter(
     (item) => resultFor(item)?.status === 'reachable',
   ).length;
-  const pending = [
-    ...sorted.filter((item) => !resultFor(item)),
-    ...sorted.filter((item) =>
-      ['error', 'no_route'].includes(resultFor(item)?.status ?? ''),
+  const walkPending = sorted.filter(
+    (item) =>
+      !ignored.includes(communityChoiceKey(anchor, item)) &&
+      walkingStatus(resultFor(item), walkingLimits) === 'pending',
+  ).length;
+  const ignoredCount = communities.filter((item) =>
+    ignored.includes(communityChoiceKey(anchor, item)),
+  ).length;
+  const batch = selectedVerificationBatch(
+    visible.filter(
+      (item) => !ignored.includes(communityChoiceKey(anchor, item)),
     ),
-  ].slice(0, 5);
+    checkedIds,
+    (item) =>
+      !['reachable', 'over_budget'].includes(resultFor(item)?.status ?? ''),
+  );
+  const selectedVisibleCount = visible.filter(
+    (item) =>
+      checkedIds.includes(item.id) &&
+      !ignored.includes(communityChoiceKey(anchor, item)),
+  ).length;
+  useEffect(() => {
+    setCheckedIds((current) => {
+      const retained = current.filter((id) =>
+        visible.some(
+          (item) =>
+            item.id === id &&
+            !ignored.includes(communityChoiceKey(anchor, item)),
+        ),
+      );
+      return retained.length === current.length ? current : retained;
+    });
+  }, [visible, ignored, anchor]);
+  // A hidden/expired result must disappear from the map as well as the list.
+  useEffect(() => {
+    const active = visible.find((item) => item.id === activeId);
+    onMapChange({
+      communities: visible,
+      activeId: active?.id,
+      verification: active ? resultFor(active) : undefined,
+    });
+  }, [visible, activeId, onMapChange]);
+
   const moreAvailable = selected.some(
     (group) => pages[group.id]?.hasMore && pages[group.id].page < 3,
   );
@@ -624,44 +710,145 @@ export function CommunityExplorer({
                     type="checkbox"
                     checked={onlyWithinBudget}
                     onChange={(event) => {
-                      const checked = event.target.checked;
-                      setOnlyWithinBudget(checked);
+                      setOnlyWithinBudget(event.target.checked);
                       setActiveId(undefined);
-                      onMapChange({
-                        communities: checked
-                          ? sorted.filter(
-                              (item) => resultFor(item)?.status === 'reachable',
-                            )
-                          : communities,
-                      });
+                      setCheckedIds([]);
                     }}
                   />
                   仅看预算内
                 </label>
               </div>
-              {pending.length > 0 && (
+              <details
+                className="community-walking-preferences"
+                open={Boolean(
+                  walkingLimits.homeMinutes || walkingLimits.totalMinutes,
+                )}
+              >
+                <summary>步行偏好（仅筛选已有核验，不发请求）</summary>
+                <div className="community-controls">
+                  <label>
+                    小区到站最多
+                    <select
+                      aria-label="小区到站最多步行"
+                      value={walkingLimits.homeMinutes}
+                      onChange={(event) => {
+                        setWalkingLimits((current) => ({
+                          ...current,
+                          homeMinutes: Number(event.target.value),
+                        }));
+                        setActiveId(undefined);
+                        setCheckedIds([]);
+                      }}
+                    >
+                      {[0, 5, 10, 15, 20].map((value) => (
+                        <option key={value} value={value}>
+                          {value ? value + ' 分钟' : '不限'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    两端合计最多
+                    <select
+                      aria-label="两端合计最多步行"
+                      value={walkingLimits.totalMinutes}
+                      onChange={(event) => {
+                        setWalkingLimits((current) => ({
+                          ...current,
+                          totalMinutes: Number(event.target.value),
+                        }));
+                        setActiveId(undefined);
+                        setCheckedIds([]);
+                      }}
+                    >
+                      {[0, 10, 15, 20, 30].map((value) => (
+                        <option key={value} value={value}>
+                          {value ? value + ' 分钟' : '不限'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    步行筛选
+                    <select
+                      aria-label="步行筛选"
+                      disabled={
+                        !walkingLimits.homeMinutes &&
+                        !walkingLimits.totalMinutes
+                      }
+                      value={walkingFilter}
+                      onChange={(event) => {
+                        setWalkingFilter(event.target.value);
+                        setActiveId(undefined);
+                        setCheckedIds([]);
+                      }}
+                    >
+                      <option value="all">全部状态</option>
+                      <option value="match">仅符合偏好</option>
+                      <option value="pending">仅待确认</option>
+                    </select>
+                  </label>
+                </div>
+                <p className="community-hint">
+                  两端指小区到上车站、下车站到公司。步行明细缺失、未核验或过期：
+                  {walkPending} 个待确认；不会按零分钟计入。
+                </p>
+              </details>
+              <div className="community-selection-toolbar">
+                <strong>已勾选 {selectedVisibleCount} / 5 个</strong>
                 <button
                   className="community-batch"
                   type="button"
-                  disabled={Boolean(busy) || disabled}
-                  onClick={() => void verify(pending)}
+                  disabled={Boolean(busy) || disabled || batch.length === 0}
+                  onClick={() => void verify(batch)}
                 >
-                  补查未完成（本批 {pending.length} 个小区）
+                  核验所选（{batch.length} 个待补查）
                 </button>
-              )}
+                <button
+                  type="button"
+                  disabled={Boolean(busy) || !checkedIds.length}
+                  onClick={() => setCheckedIds([])}
+                >
+                  清空勾选
+                </button>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={showIgnored}
+                    onChange={(event) => {
+                      setShowIgnored(event.target.checked);
+                      setActiveId(undefined);
+                      setCheckedIds([]);
+                    }}
+                  />
+                  显示暂不考虑（{ignoredCount}）
+                </label>
+                <small>
+                  每批最多 5
+                  个，只核验当前显示且已勾选的小区。有效结果自动复用，不重复请求。
+                </small>
+              </div>
               {visible.length === 0 && (
                 <p className="direction-empty">
                   {onlyWithinBudget
                     ? '暂未核验出预算内的小区；可取消筛选后继续核验。'
-                    : errors.length
-                      ? '本批未取得小区结果，请重试失败站点。'
-                      : '当前范围未找到住宅小区，可扩大到 1 公里或更换沿线站点。'}
+                    : communities.length
+                      ? '没有符合当前筛选的小区；可切换步行状态、取消筛选或显示暂不考虑。'
+                      : errors.length
+                        ? '本批未取得小区结果，请重试失败站点。'
+                        : '当前范围未找到住宅小区，可扩大到 1 公里或更换沿线站点。'}
                 </p>
               )}
               <div className="community-list">
                 {visible.map((community) => {
                   const result = resultFor(community);
                   const seed = chosenSeed(community);
+                  const choiceKey = communityChoiceKey(anchor, community);
+                  const excluded = ignored.includes(choiceKey);
+                  const favorite = favorites.some(
+                    (item) => item.id === choiceKey,
+                  );
+                  const walk = walkingStatus(result, walkingLimits);
                   const historical =
                     seed &&
                     verifications[
@@ -678,6 +865,89 @@ export function CommunityExplorer({
                       className={`community-card${activeId === community.id ? ' is-active' : ''}`}
                       key={community.id}
                     >
+                      <div className="community-card-selection">
+                        <label>
+                          <input
+                            type="checkbox"
+                            aria-label={`勾选核验${community.name}`}
+                            checked={checkedIds.includes(community.id)}
+                            disabled={
+                              Boolean(busy) ||
+                              disabled ||
+                              excluded ||
+                              (!checkedIds.includes(community.id) &&
+                                checkedIds.length >= COMMUNITY_BATCH_LIMIT)
+                            }
+                            onChange={(event) =>
+                              setCheckedIds((ids) =>
+                                toggleCommunitySelection(
+                                  ids,
+                                  community.id,
+                                  event.target.checked,
+                                ),
+                              )
+                            }
+                          />
+                          核验
+                        </label>
+                        <button
+                          type="button"
+                          aria-label={`${favorite ? '更新收藏' : '收藏小区'}${community.name}`}
+                          disabled={!seed}
+                          onClick={() => {
+                            if (seed)
+                              onFavorite(
+                                makeFavorite(
+                                  community,
+                                  anchor,
+                                  seed,
+                                  departureDate,
+                                  departureTime,
+                                  historical,
+                                ),
+                              );
+                          }}
+                        >
+                          {favorite ? '更新收藏' : '收藏小区'}
+                        </button>
+                        {favorite && (
+                          <button
+                            type="button"
+                            aria-label={`取消收藏${community.name}`}
+                            onClick={() => onRemoveFavorite(choiceKey)}
+                          >
+                            已收藏 ×
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={Boolean(busy)}
+                          onClick={() => {
+                            onIgnore(choiceKey, !excluded);
+                            setCheckedIds((ids) =>
+                              ids.filter((id) => id !== community.id),
+                            );
+                            setActiveId(undefined);
+                          }}
+                        >
+                          {excluded ? '恢复考虑' : '暂不考虑'}
+                        </button>
+                      </div>
+                      {walk !== 'unlimited' && (
+                        <p className={`community-walking-status is-${walk}`}>
+                          {walk === 'match'
+                            ? '符合步行偏好'
+                            : walk === 'over'
+                              ? '超出步行偏好'
+                              : '步行待确认（明细缺失、尚未核验或已过期）'}
+                        </p>
+                      )}
+                      {excluded && (
+                        <p className="community-hint">
+                          暂不考虑 ·
+                          不参与批量核验，可随时恢复；收藏不会被删除。
+                        </p>
+                      )}
                       <details className="community-card-details">
                         <summary aria-label={`${community.name}的详情`}>
                           <div className="community-card-heading">
@@ -745,7 +1015,6 @@ export function CommunityExplorer({
                                     verifications,
                                     choices: updated,
                                   });
-                                  onMapChange({ communities });
                                 }}
                               >
                                 {community.seedIds.map((id) => {
@@ -810,7 +1079,7 @@ export function CommunityExplorer({
                               onClick={() => {
                                 setActiveId(community.id);
                                 onMapChange({
-                                  communities,
+                                  communities: visible,
                                   activeId: community.id,
                                   verification: result,
                                 });
@@ -823,7 +1092,7 @@ export function CommunityExplorer({
                             </button>
                             <button
                               type="button"
-                              disabled={Boolean(busy) || disabled}
+                              disabled={Boolean(busy) || disabled || excluded}
                               onClick={() =>
                                 void verify([community], Boolean(result))
                               }

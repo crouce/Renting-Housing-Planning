@@ -1,5 +1,8 @@
 'use client';
 
+import { useCommunityCollection } from '@/components/use-community-collection';
+import { CommunityFavorites } from '@/components/community-favorites';
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
@@ -441,6 +444,11 @@ export function CommutePlanner() {
   const [memoryClearNonce, setMemoryClearNonce] = useState(0);
   const [rememberLocally, setRememberLocally] = useState(true);
   const [recentPlaces, setRecentPlaces] = useState<PlaceTip[]>([]);
+  const collection = useCommunityCollection(
+    rememberLocally,
+    memoryReady,
+    memoryClearNonce,
+  );
   const [memoryMessage, setMemoryMessage] = useState('');
   const [stationMemory, setStationMemory] = useState<{
     savedAt: number;
@@ -2159,7 +2167,8 @@ export function CommutePlanner() {
                     <span>
                       <strong>仅在这台设备记住</strong>
                       <small>
-                        5 个地点 · 6 组站点 · 4 次通勤 · 3 组小区，不保存密钥
+                        5 个地点 · 6 组站点 · 4 次通勤 · 3 组小区 · 20
+                        个收藏，不保存密钥；关闭记忆会清除收藏
                       </small>
                     </span>
                     <button
@@ -2184,10 +2193,10 @@ export function CommutePlanner() {
                       setRecentPlaces([]);
                       setStationMemory(null);
                       setCommuteMemory(null);
-                      setMemoryMessage('已清除本机保存的地点和条件');
+                      setMemoryMessage('已清除本机记录，包含收藏和暂不考虑');
                     }}
                   >
-                    <Trash2 aria-hidden="true" /> 清除本机记录
+                    <Trash2 aria-hidden="true" /> 清除本机记录（含收藏）
                   </button>
                 </div>
               </details>
@@ -2734,6 +2743,11 @@ export function CommutePlanner() {
               memoryEpoch={memoryClearNonce}
               disabled={Boolean(retryingDirectionId) || invalidDate}
               onMapChange={drawCommunityMap}
+              favorites={collection.favorites}
+              ignored={collection.ignored}
+              onFavorite={collection.save}
+              onRemoveFavorite={collection.remove}
+              onIgnore={collection.ignore}
             />
           ) : (
             <section id="commute-communities" className="community-section">
@@ -2745,6 +2759,16 @@ export function CommutePlanner() {
               </p>
             </section>
           )}
+          <CommunityFavorites
+            favorites={collection.favorites}
+            onRemove={collection.remove}
+            anchor={selectedPlace}
+            date={departureDate}
+            time={departureTime}
+            budget={budget}
+            remember={rememberLocally}
+            notice={collection.notice}
+          />
         </aside>
 
         <div className="map-panel" aria-label="地图区域">

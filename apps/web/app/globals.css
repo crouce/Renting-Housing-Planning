@@ -1657,6 +1657,176 @@ input {
   background: #dce4df;
 }
 
+.community-selection-toolbar,
+.community-walking-preferences {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #d4e2dc;
+  border-radius: 10px;
+  background: #f1f7f4;
+  font-size: 12px;
+}
+.community-walking-preferences summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.community-walking-preferences .community-controls {
+  margin-top: 10px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.community-selection-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.community-selection-toolbar > small {
+  display: block;
+  flex-basis: 100%;
+  color: #597267;
+  line-height: 1.5;
+}
+.community-selection-toolbar label,
+.community-card-selection label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.community-selection-toolbar .community-batch {
+  margin: 0;
+}
+.community-card-selection {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px 0;
+  font-size: 11px;
+}
+.community-card-selection button,
+.community-selection-toolbar > button:not(.community-batch),
+.favorite-list button {
+  padding: 6px 8px;
+  border: 1px solid #cedbd5;
+  background: #fff;
+  color: #254f40;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.community-card-selection button:disabled,
+.community-selection-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.community-walking-status {
+  margin: 9px 12px 0;
+  font-size: 11px;
+  color: #76612e;
+}
+.community-walking-status.is-match {
+  color: #176349;
+}
+.community-walking-status.is-over {
+  color: #b14229;
+}
+.community-favorites {
+  border-top: 1px solid #d6e2dc;
+  padding-top: 22px;
+  margin-top: 24px;
+}
+.community-favorites h2 {
+  display: flex;
+  justify-content: space-between;
+  font-size: 16px;
+}
+.community-favorites h2 small {
+  font-size: 12px;
+  color: #64776f;
+}
+.favorite-list {
+  display: grid;
+  gap: 8px;
+}
+.favorite-list article {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid #d4e2dc;
+  border-radius: 10px;
+  padding: 10px;
+}
+.favorite-list label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+.favorite-list label span {
+  display: grid;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+.favorite-list label small {
+  color: #5c6f65;
+  line-height: 1.5;
+}
+.favorite-list input {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.favorite-list button {
+  flex-shrink: 0;
+}
+.favorite-comparison {
+  overflow-x: auto;
+  max-width: 100%;
+  border: 1px solid #cedbd5;
+  border-radius: 10px;
+  margin-top: 14px;
+}
+.favorite-comparison table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.favorite-comparison.is-wide table {
+  min-width: 460px;
+}
+.favorite-comparison tr > :first-child {
+  width: 80px;
+}
+.favorite-comparison caption {
+  text-align: left;
+  padding: 10px;
+  background: #fff8ea;
+  color: #746139;
+}
+.favorite-comparison th,
+.favorite-comparison td {
+  padding: 9px;
+  border-bottom: 1px solid #e2e9e5;
+  border-right: 1px solid #e2e9e5;
+  text-align: left;
+  vertical-align: top;
+  max-width: 170px;
+  overflow-wrap: anywhere;
+}
+.favorite-comparison th {
+  background: #eef5f1;
+}
+.favorite-comparison thead th {
+  color: #1c513d;
+}
+input[type='checkbox'] {
+  accent-color: #176349;
+}
+
 /* Three-step planning flow; keep detail available without repeating it. */
 .planner-steps {
   position: sticky;
