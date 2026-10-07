@@ -2,6 +2,12 @@
 
 import { useCommunityCollection } from '@/components/use-community-collection';
 import { CommunityFavorites } from '@/components/community-favorites';
+import {
+  LocalDataControls,
+  type ClearLocalAction,
+} from '@/components/local-data-controls';
+import { mergeBackupCollection, type LocalBackup } from '@/lib/local-backup';
+import { emptyCollection } from '@/lib/community-collection';
 import { overlappingCommunities, pinLabel } from '@/lib/community-map';
 import type { Community } from '@/lib/community-types';
 
@@ -25,7 +31,6 @@ import {
   Settings2,
   Sparkles,
   TrainFront,
-  Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -57,6 +62,8 @@ import type {
 import {
   addRecentPlace,
   clearAllLocalMemory,
+  clearQueryCaches,
+  clearPlannerMemory,
   isLocalMemoryEnabled,
   readCommuteCache,
   readPlannerMemory,
@@ -456,6 +463,7 @@ export function CommutePlanner() {
     memoryClearNonce,
   );
   const [memoryMessage, setMemoryMessage] = useState('');
+  const [localDataBusy, setLocalDataBusy] = useState(false);
   const [stationMemory, setStationMemory] = useState<{
     savedAt: number;
     stale: boolean;
@@ -873,6 +881,59 @@ export function CommutePlanner() {
     }
   }
 
+  async function clearLocalData(action: ClearLocalAction) {
+    setLocalDataBusy(true);
+    try {
+      if (action !== 'collection') {
+        resetReachability();
+        await clearQueryCaches();
+        setStationMemory(null);
+        setCommuteMemory(null);
+      }
+      if (action !== 'queries') collection.replace(emptyCollection());
+      if (action === 'all') {
+        clearPlannerMemory();
+        skipMemoryWriteRef.current = true;
+        setRecentPlaces([]);
+        setMemoryClearNonce((value) => value + 1);
+      }
+    } finally {
+      setLocalDataBusy(false);
+    }
+  }
+
+  function importLocalData(backup: LocalBackup, restore: boolean) {
+    const merged = mergeBackupCollection(collection, backup.collection);
+    if (restore && backup.planner) {
+      const preferences = backup.planner.preferences;
+      if (preferences.selectedPlace) selectPlace(preferences.selectedPlace);
+      else {
+        handleQueryChange('');
+        setStationState('idle');
+      }
+      setBudget(preferences.budget);
+      setDepartureDate(preferences.departureDate);
+      setDepartureTime(preferences.departureTime);
+      setStationRadius(preferences.stationRadius);
+      restoredSelectionRef.current = {
+        stationIds: preferences.selectedStationIds ?? [],
+        lineKeys: preferences.selectedLineKeys ?? [],
+      };
+      setSettingsExpanded(true);
+    }
+    if (backup.planner)
+      setRecentPlaces((current) => {
+        const byId = new Map(
+          current.map((place) => [place.id + ':' + place.location, place]),
+        );
+        for (const place of backup.planner!.recentPlaces)
+          if (!byId.has(place.id + ':' + place.location))
+            byId.set(place.id + ':' + place.location, place);
+        return [...byId.values()].slice(0, 5);
+      });
+    collection.replace(merged);
+  }
+
   function selectPlace(place: PlaceTip) {
     setSelectedPlace(place);
     setQuery(place.name);
@@ -1234,6 +1295,13 @@ export function CommutePlanner() {
 
   const drawCommunityMap = useCallback(
     (selection: CommunityMapSelection, restore = false) => {
+      if (
+        selection.source === 'favorites' &&
+        !selection.focus &&
+        !restore &&
+        communitySelectionRef.current.source !== 'favorites'
+      )
+        return;
       if (selection.source !== 'favorites') {
         explorerSelectionRef.current = selection;
         if (
@@ -1443,6 +1511,7 @@ export function CommutePlanner() {
       !memoryReady ||
       !rememberLocally ||
       !selectedPlace ||
+      localDataBusy ||
       selectedStationIds.length === 0 ||
       stationState !== 'ready' ||
       reachabilityState !== 'idle' ||
@@ -1479,6 +1548,7 @@ export function CommutePlanner() {
     memoryReady,
     reachabilityState,
     calculationStopped,
+    localDataBusy,
     rememberLocally,
     selectedLineKeys,
     selectedPlace,
@@ -2222,27 +2292,31 @@ export function CommutePlanner() {
                       className="memory-toggle"
                       aria-checked={rememberLocally}
                       aria-label="在本机记住工作地点和通勤条件"
+                      disabled={localDataBusy}
                       onClick={() => setMemoryPreference(!rememberLocally)}
                     >
                       <span />
                     </button>
                   </div>
                   {memoryMessage && <p>{memoryMessage}</p>}
-                  <button
-                    type="button"
-                    disabled={!rememberLocally}
-                    onClick={() => {
-                      skipMemoryWriteRef.current = true;
-                      setMemoryClearNonce((value) => value + 1);
-                      void clearAllLocalMemory();
-                      setRecentPlaces([]);
-                      setStationMemory(null);
-                      setCommuteMemory(null);
-                      setMemoryMessage('已清除本机记录，包含收藏和暂不考虑');
+                  <LocalDataControls
+                    collection={collection}
+                    enabled={rememberLocally}
+                    planner={{
+                      preferences: {
+                        selectedPlace,
+                        budget,
+                        departureDate,
+                        departureTime,
+                        stationRadius,
+                        selectedStationIds,
+                        selectedLineKeys,
+                      },
+                      recentPlaces,
                     }}
-                  >
-                    <Trash2 aria-hidden="true" /> 清除本机记录（含收藏）
-                  </button>
+                    onClear={clearLocalData}
+                    onImport={importLocalData}
+                  />
                 </div>
               </details>
 
@@ -2786,7 +2860,9 @@ export function CommutePlanner() {
               departureTime={departureTime}
               remember={rememberLocally}
               memoryEpoch={memoryClearNonce}
-              disabled={Boolean(retryingDirectionId) || invalidDate}
+              disabled={
+                Boolean(retryingDirectionId) || invalidDate || localDataBusy
+              }
               onMapChange={drawCommunityMap}
               favorites={collection.favorites}
               ignored={collection.ignored}
@@ -2815,6 +2891,7 @@ export function CommutePlanner() {
             notice={collection.notice}
             seeds={communitySeeds}
             disabled={
+              localDataBusy ||
               reachabilityState === 'loading' ||
               Boolean(retryingDirectionId) ||
               invalidDate

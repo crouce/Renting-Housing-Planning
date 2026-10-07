@@ -1841,6 +1841,54 @@ input {
   margin: 8px 0;
   padding-left: 18px;
 }
+.local-data-controls {
+  display: block !important;
+  margin-top: 12px;
+  border-top: 1px solid #dce5df;
+  padding-top: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.local-data-actions {
+  display: grid;
+  gap: 8px;
+}
+.local-data-controls button {
+  border: 1px solid #c9ddd4;
+  border-radius: 7px;
+  padding: 8px;
+  background: #fff;
+  color: #194b3c;
+  text-align: left;
+  cursor: pointer;
+}
+.local-data-controls button:disabled {
+  opacity: 0.5;
+}
+.backup-file-label {
+  display: grid;
+  gap: 6px;
+  font-size: 11px;
+  padding: 8px 0;
+}
+.backup-file-label input {
+  width: 100%;
+  min-width: 0;
+  font-size: 11px;
+}
+.local-data-confirm {
+  padding: 10px;
+  margin-top: 10px;
+  background: #fff8ea;
+  border: 1px solid #e4d4b2;
+  border-radius: 8px;
+}
+.local-data-confirm button {
+  margin: 6px 6px 0 0;
+}
+.local-data-confirm input {
+  margin-right: 6px;
+}
 .favorite-comparison {
   overflow-x: auto;
   max-width: 100%;

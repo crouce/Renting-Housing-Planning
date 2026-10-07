@@ -76,5 +76,9 @@ export function useCommunityCollection(
       update((previous) => setIgnored(previous, id, ignored)),
     [update],
   );
-  return { ...collection, notice, save, remove, ignore };
+  const replace = useCallback(
+    (next: CommunityCollection) => update(() => next),
+    [update],
+  );
+  return { ...collection, notice, save, remove, ignore, replace };
 }

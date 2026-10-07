@@ -43,6 +43,7 @@ export function FavoriteVerification({
     time,
     budget,
     disabled,
+    favorites.map((item) => item.id).sort(),
   ]);
   useEffect(() => {
     controller.current?.abort();
@@ -100,7 +101,9 @@ export function FavoriteVerification({
               departureTime: time,
             }),
           });
-          const data = await response.json() as CommunityVerification & { error?: { message?: string } };
+          const data = (await response.json()) as CommunityVerification & {
+            error?: { message?: string };
+          };
           if (!response.ok)
             throw new Error(data.error?.message ?? '收藏核验失败');
           result = data;

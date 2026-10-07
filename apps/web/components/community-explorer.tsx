@@ -15,9 +15,11 @@ import {
 } from '@/lib/community-selection';
 import {
   communityChoiceKey,
+  currentFavoriteProof,
   makeFavorite,
   type Favorite,
 } from '@/lib/community-collection';
+import { favoriteSeed } from '@/lib/favorite-recheck';
 import {
   readCommunityCache,
   readCommunityHistory,
@@ -171,6 +173,39 @@ export function CommunityExplorer({
     () => new Map(seeds.map((seed) => [seed.id, seed])),
     [seeds],
   );
+  useEffect(() => {
+    setVerifications((previous) => {
+      let next = previous;
+      for (const saved of favorites) {
+        if (!currentFavoriteProof(saved, anchor, departureDate, departureTime))
+          continue;
+        const community = communities.find(
+          (item) =>
+            item.id === saved.community.id &&
+            item.location === saved.community.location,
+        );
+        const seed = favoriteSeed(saved, seeds);
+        if (!community || !seed || !community.seedIds.includes(seed.id))
+          continue;
+        const key = communityRouteKey(
+          community,
+          anchor,
+          seed,
+          departureDate,
+          departureTime,
+        );
+        if (
+          previous[key] &&
+          previous[key].checkedAt >= saved.verification!.checkedAt
+        )
+          continue;
+        if (next === previous) next = { ...previous };
+        // Favorites deliberately omit geometry. Reuse timing evidence without inventing a path.
+        next[key] = { ...saved.verification!, geometry: [] };
+      }
+      return next;
+    });
+  }, [favorites, communities, seeds, anchor, departureDate, departureTime]);
 
   useEffect(() => {
     const now = Date.now();

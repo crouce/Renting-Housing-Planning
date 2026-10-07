@@ -34,6 +34,7 @@ const CACHE_DATABASE_VERSION = 2;
 const STATION_STORE = 'station-cache';
 const COMMUTE_STORE = 'commute-cache';
 const COMMUNITY_STORE = 'community-cache';
+let cacheEpoch = 0;
 export const COMMUNITY_CACHE_LIMIT = 3;
 export const RECENT_PLACE_LIMIT = 5;
 export const STATION_CACHE_LIMIT = 6;
@@ -175,6 +176,7 @@ async function pruneStore(storeName: string, limit: number) {
 }
 
 async function readCache<T>(storeName: string, key: string) {
+  const epoch = cacheEpoch;
   if (!isLocalMemoryEnabled()) return null;
   try {
     const database = await openCacheDatabase();
@@ -184,7 +186,7 @@ async function readCache<T>(storeName: string, key: string) {
       const record = (await requestResult(
         store.get(key),
       )) as LocalCacheRecord<T> | null;
-      if (!record) return null;
+      if (!record || epoch !== cacheEpoch) return null;
       if (record.discardAfter <= Date.now()) {
         store.delete(key);
         return null;
@@ -208,11 +210,13 @@ async function writeCache<T>(
   limit: number,
   checkedAt = Date.now(),
 ) {
+  const epoch = cacheEpoch;
   if (!isLocalMemoryEnabled()) return;
   try {
     const database = await openCacheDatabase();
     const now = Date.now();
     try {
+      if (epoch !== cacheEpoch) return;
       const transaction = database.transaction(storeName, 'readwrite');
       transaction.objectStore(storeName).put({
         key,
@@ -236,6 +240,7 @@ async function updateCache<T>(
   key: string,
   update: (data: T) => T,
 ) {
+  const epoch = cacheEpoch;
   if (!isLocalMemoryEnabled()) return;
   try {
     const database = await openCacheDatabase();
@@ -245,7 +250,8 @@ async function updateCache<T>(
       const record = (await requestResult(
         store.get(key),
       )) as LocalCacheRecord<T> | null;
-      if (!record || record.discardAfter <= Date.now()) return;
+      if (!record || epoch !== cacheEpoch || record.discardAfter <= Date.now())
+        return;
       record.data = update(record.data);
       record.lastAccessedAt = Date.now();
       store.put(record);
@@ -336,6 +342,7 @@ export function writeCommunityCache<T>(key: string, data: T) {
 }
 
 export async function clearAllLocalMemory() {
+  cacheEpoch++;
   clearPlannerMemory();
   try {
     window.localStorage.removeItem(COLLECTION_KEY);
@@ -349,4 +356,26 @@ export async function clearAllLocalMemory() {
     request.onerror = () => resolve();
     request.onblocked = () => resolve();
   });
+}
+
+export async function clearQueryCaches() {
+  cacheEpoch++;
+  const database = await openCacheDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(
+        [STATION_STORE, COMMUTE_STORE, COMMUNITY_STORE],
+        'readwrite',
+      );
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () =>
+        reject(transaction.error ?? new Error('查询缓存清理失败，请重试。'));
+      transaction.onabort = () =>
+        reject(new Error('查询缓存清理被中止，未确认完成。'));
+      for (const store of [STATION_STORE, COMMUTE_STORE, COMMUNITY_STORE])
+        transaction.objectStore(store).clear();
+    });
+  } finally {
+    database.close();
+  }
 }

@@ -19,7 +19,7 @@ const code = ts
       new URL('../lib/community-collection.ts', import.meta.url).href,
     ),
   );
-const { clearAllLocalMemory } = await import(
+const { clearAllLocalMemory, clearQueryCaches } = await import(
   'data:text/javascript,' + encodeURIComponent(code)
 );
 test('explicit clear removes independent favorites and ignored records together with query memory', async () => {
@@ -50,5 +50,67 @@ test('explicit clear removes independent favorites and ignored records together 
   } finally {
     if (savedWindow === undefined) delete globalThis.window;
     else globalThis.window = savedWindow;
+  }
+});
+
+test('query-only clear waits for transaction completion and preserves every localStorage record', async () => {
+  const previous = globalThis.window;
+  const cleared = [];
+  let closed = false;
+  const memory = new Map([
+    [COLLECTION_KEY, 'favorites'],
+    ['commute-radius:planner-memory:v1', 'preferences'],
+  ]);
+  let finish;
+  const db = {
+    close() {
+      closed = true;
+    },
+    transaction(names, mode) {
+      assert.deepEqual(names, [
+        'station-cache',
+        'commute-cache',
+        'community-cache',
+      ]);
+      assert.equal(mode, 'readwrite');
+      const tx = {
+        objectStore(name) {
+          return {
+            clear() {
+              cleared.push(name);
+            },
+          };
+        },
+      };
+      finish = () => tx.oncomplete();
+      return tx;
+    },
+  };
+  globalThis.window = {
+    localStorage: { removeItem: (key) => memory.delete(key) },
+    indexedDB: {
+      open() {
+        const request = { result: db };
+        queueMicrotask(() => request.onsuccess());
+        return request;
+      },
+    },
+  };
+  try {
+    let resolved = false;
+    const pending = clearQueryCaches().then(() => {
+      resolved = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(resolved, false);
+    assert.equal(closed, false);
+    finish();
+    await pending;
+    assert.equal(closed, true);
+    assert.equal(cleared.length, 3);
+    assert.equal(memory.get(COLLECTION_KEY), 'favorites');
+    assert.equal(memory.get('commute-radius:planner-memory:v1'), 'preferences');
+  } finally {
+    globalThis.window = previous;
   }
 });

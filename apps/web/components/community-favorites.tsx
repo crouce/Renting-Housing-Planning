@@ -37,7 +37,7 @@ export function CommunityFavorites({
   onMapChange?: (selection: CommunityMapSelection) => void;
 }) {
   const [checked, setChecked] = useState<string[]>([]);
-  const [, tick] = useState(0);
+  const [clock, tick] = useState(0);
   const cards = useRef(new Map<string, HTMLElement>());
   const [located, setLocated] = useState<string>();
   useEffect(() => {
@@ -58,13 +58,12 @@ export function CommunityFavorites({
       : item.verification
         ? '历史或条件不同 · 待重新核验'
         : '尚未核验';
-  function locate(item: Favorite) {
-    setLocated(item.id);
+  function drawFavorite(item: Favorite, focus: boolean) {
     onMapChange?.({
       communities: [item.community],
       activeId: item.community.id,
       source: 'favorites',
-      focus: true,
+      focus,
       anchor: item.anchor,
       states: {
         [item.community.id]: {
@@ -84,6 +83,18 @@ export function CommunityFavorites({
       },
     });
   }
+  function locate(item: Favorite) {
+    setLocated(item.id);
+    drawFavorite(item, true);
+  }
+  useEffect(() => {
+    const item = favorites.find((item) => item.id === located);
+    if (item) drawFavorite(item, false);
+    else if (located) {
+      setLocated(undefined);
+      onMapChange?.({ communities: [], source: 'favorites', focus: false });
+    }
+  }, [favorites, located, anchor, date, time, budget, clock, onMapChange]);
   return (
     <section className="community-favorites" aria-label="收藏与对比">
       <h2>
