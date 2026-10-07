@@ -6,9 +6,12 @@ import {
   emptyCollection,
   parseCollection,
   setIgnored,
+  setCollectionEntrance,
   type CommunityCollection,
   type Favorite,
 } from '@/lib/community-collection';
+import type { EntranceKind } from '@/lib/entrances';
+import type { TransitStop } from '@/lib/community-types';
 
 export function useCommunityCollection(
   enabled: boolean,
@@ -34,7 +37,7 @@ export function useCommunityCollection(
     (change: (previous: CommunityCollection) => CommunityCollection) => {
       try {
         const next = change(ref.current);
-        if (next === ref.current) return;
+        if (next === ref.current) return true;
         ref.current = next;
         setCollection(next);
         setNotice(
@@ -47,8 +50,10 @@ export function useCommunityCollection(
             setNotice('本机空间不足或不可用，本次修改仅在当前页面保留。');
           }
         }
+        return true;
       } catch (error) {
         setNotice(error instanceof Error ? error.message : '收藏更新失败。');
+        return false;
       }
     },
     [enabled, ready],
@@ -80,5 +85,20 @@ export function useCommunityCollection(
     (next: CommunityCollection) => update(() => next),
     [update],
   );
-  return { ...collection, notice, save, remove, ignore, replace };
+  const adjustEntrance = useCallback(
+    (kind: EntranceKind, place: TransitStop, location: string) =>
+      update((previous) =>
+        setCollectionEntrance(previous, kind, place, location),
+      ),
+    [update],
+  );
+  return {
+    ...collection,
+    notice,
+    save,
+    remove,
+    ignore,
+    replace,
+    adjustEntrance,
+  };
 }

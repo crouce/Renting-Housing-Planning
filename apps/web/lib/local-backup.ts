@@ -14,6 +14,12 @@ import type {
   TransitStop,
 } from './community-types';
 import { validDepartureDate } from './departure-date.ts';
+import {
+  validEntrance,
+  ENTRANCE_LIMIT,
+  entranceKey,
+  type Entrance,
+} from './entrances.ts';
 
 export const BACKUP_MAX_BYTES = 1_000_000;
 export type BackupPlanner = {
@@ -44,7 +50,19 @@ const list = (value: unknown, max: number): unknown[] =>
   Array.isArray(value) && value.length <= max ? value : invalid();
 function stop(value: unknown): TransitStop {
   if (!validStop(value)) return invalid();
-  return { id: value.id, name: value.name, location: value.location };
+  if (
+    value.originalLocation !== undefined &&
+    !validLocation(value.originalLocation)
+  )
+    return invalid();
+  return {
+    id: value.id,
+    name: value.name,
+    location: value.location,
+    ...(value.originalLocation
+      ? { originalLocation: value.originalLocation }
+      : {}),
+  };
 }
 function seed(value: unknown): BoardingStation {
   if (!validSeed(value)) return invalid();
@@ -175,12 +193,13 @@ function planner(value: unknown): BackupPlanner | null {
 }
 export function validateCollectionSize(collection: CommunityCollection) {
   if (
+    (collection.entrances?.length ?? 0) > ENTRANCE_LIMIT ||
     collection.favorites.length > FAVORITE_LIMIT ||
     collection.ignored.length > IGNORED_LIMIT ||
     JSON.stringify(collection).length * 2 > COLLECTION_MAX_BYTES
   )
     throw new Error(
-      '合并后超出 20 个收藏、100 条排除或约 500 KiB 上限。请先整理记录，未导入任何内容。',
+      '合并后超出 20 个收藏、100 条排除、40 个入口或约 500 KiB 上限。请先整理记录，未导入任何内容。',
     );
   return collection;
 }
@@ -198,6 +217,20 @@ function sanitize(value: unknown, importing: boolean): LocalBackup {
   );
   const collection: CommunityCollection = {
     version: 1,
+    ...(c.entrances === undefined
+      ? {}
+      : {
+          entrances: list(c.entrances, ENTRANCE_LIMIT).map((value) => {
+            if (!validEntrance(value)) return invalid();
+            return {
+              kind: value.kind,
+              id: value.id,
+              name: value.name,
+              originalLocation: value.originalLocation,
+              location: value.location,
+            } as Entrance;
+          }),
+        }),
     favorites: [...new Map(favorites.map((item) => [item.id, item])).values()],
     ignored: [...new Set(list(c.ignored, IGNORED_LIMIT).map(ignoredKey))],
   };
@@ -248,6 +281,17 @@ export function mergeBackupCollection(
   const retained = new Set(current.favorites.map((item) => item.id));
   return validateCollectionSize({
     version: 1,
+    ...(current.entrances || incoming.entrances
+      ? {
+          entrances: [
+            ...new Map(
+              [...(incoming.entrances ?? []), ...(current.entrances ?? [])].map(
+                (e) => [entranceKey(e), e],
+              ),
+            ).values(),
+          ],
+        }
+      : {}),
     favorites: [
       ...current.favorites,
       ...incoming.favorites.filter((item) => !retained.has(item.id)),

@@ -1,4 +1,9 @@
-export type TransitStop = { id: string; name: string; location: string };
+export type TransitStop = {
+  id: string;
+  name: string;
+  location: string;
+  originalLocation?: string;
+};
 export type BoardingStation = {
   id: string;
   directionId: string;

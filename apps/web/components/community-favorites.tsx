@@ -8,6 +8,7 @@ import {
   type Favorite,
 } from '@/lib/community-collection';
 import type { BoardingStation, TransitStop } from '@/lib/community-types';
+import type { EntranceKind } from '@/lib/entrances';
 
 export function CommunityFavorites({
   favorites,
@@ -22,6 +23,7 @@ export function CommunityFavorites({
   disabled = false,
   onSave,
   onMapChange,
+  onEditEntrance,
 }: {
   favorites: Favorite[];
   onRemove: (id: string) => void;
@@ -35,6 +37,7 @@ export function CommunityFavorites({
   disabled?: boolean;
   onSave?: (item: Favorite, onlyIfSaved?: boolean) => void;
   onMapChange?: (selection: CommunityMapSelection) => void;
+  onEditEntrance?: (kind: EntranceKind, place: TransitStop) => void;
 }) {
   const [checked, setChecked] = useState<string[]>([]);
   const [clock, tick] = useState(0);
@@ -127,6 +130,16 @@ export function CommunityFavorites({
               else cards.current.delete(item.id);
             }}
           >
+            {onEditEntrance && (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onEditEntrance('community', item.community)}
+                aria-label={`校正收藏${item.community.name}的入口`}
+              >
+                校正入口
+              </button>
+            )}
             <label>
               <input
                 type="checkbox"

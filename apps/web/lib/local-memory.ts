@@ -1,6 +1,7 @@
 import { COLLECTION_KEY } from './community-collection';
 
 export type RememberedPlace = {
+  originalLocation?: string;
   id: string;
   name: string;
   district: string;

@@ -41,8 +41,8 @@ export function LocalDataControls({
     queries:
       '仅清理附近站点、通勤结果和小区查询缓存；保留地点、条件、收藏和暂不考虑。当前计算会停止，通勤与小区结果收起，附近站点暂留本页。',
     collection:
-      '删除全部收藏和暂不考虑记录，不删除查询缓存与地点。此操作不可撤销，建议先导出备份。',
-    all: '清除地点、查询缓存、收藏及暂不考虑。此操作不可撤销，建议先导出备份；当前地点与条件仍保留在页面，后续操作可能重新记忆。',
+      '删除全部收藏和暂不考虑记录，不删除入口校正、查询缓存与地点。此操作不可撤销，建议先导出备份。',
+    all: '清除地点、入口校正、查询缓存、收藏及暂不考虑。此操作不可撤销，建议先导出备份；当前地点与条件仍保留在页面，后续操作可能重新记忆。',
   };
   const merged = backup
     ? (() => {
@@ -57,7 +57,7 @@ export function LocalDataControls({
     <div className="local-data-controls">
       <strong>本机数据管理</strong>
       <p>
-        清理查询缓存可以保留收藏。备份仅含地点、偏好、收藏与排除，不含密钥或路线几何；包含位置，请妥善保管，不上传服务器。
+        清理查询缓存可以保留收藏。备份仅含地点、入口校正、偏好、收藏与排除，不含密钥或路线几何；包含位置，请妥善保管，不上传服务器。
       </p>
       <div className="local-data-actions">
         <button
@@ -188,6 +188,7 @@ export function LocalDataControls({
           <p>
             {backup.collection.favorites.length} 个收藏、
             {backup.collection.ignored.length} 条暂不考虑、
+            {backup.collection.entrances?.length ?? 0} 个入口校正、
             {backup.planner?.recentPlaces.length ?? 0} 个最近地点。
           </p>
           <p>

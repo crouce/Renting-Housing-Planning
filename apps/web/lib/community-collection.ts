@@ -4,6 +4,14 @@ import type {
   CommunityVerification,
   TransitStop,
 } from './community-types';
+import {
+  applyEntrance,
+  changeEntrance,
+  ENTRANCE_LIMIT,
+  validEntrance,
+  type Entrance,
+  type EntranceKind,
+} from './entrances.ts';
 
 export const COLLECTION_KEY = 'commute-radius:community-collection:v1';
 export const FAVORITE_LIMIT = 20;
@@ -27,6 +35,7 @@ export type Favorite = {
   verification?: Omit<CommunityVerification, 'geometry'>;
 };
 export type CommunityCollection = {
+  entrances?: Entrance[];
   version: 1;
   favorites: Favorite[];
   ignored: string[];
@@ -68,7 +77,12 @@ export function makeFavorite(
   return {
     id: communityChoiceKey(anchor, community),
     community: { ...community, seedIds: [] },
-    anchor: { id: anchor.id, name: anchor.name, location: anchor.location },
+    anchor: {
+      id: anchor.id,
+      name: anchor.name,
+      location: anchor.location,
+      originalLocation: anchor.originalLocation,
+    },
     date,
     time,
     savedAt: Date.now(),
@@ -198,6 +212,13 @@ export function parseCollection(raw: string | null): CommunityCollection {
     );
     return {
       version: 1,
+      ...(Array.isArray(value.entrances)
+        ? {
+            entrances: value.entrances
+              .filter(validEntrance)
+              .slice(0, ENTRANCE_LIMIT),
+          }
+        : {}),
       favorites: [
         ...new Map(favorites.map((item) => [item.id, item])).values(),
       ].slice(0, FAVORITE_LIMIT),
@@ -208,4 +229,45 @@ export function parseCollection(raw: string | null): CommunityCollection {
   } catch {
     return emptyCollection();
   }
+}
+
+export function setCollectionEntrance(
+  collection: CommunityCollection,
+  kind: EntranceKind,
+  place: TransitStop,
+  location: string,
+): CommunityCollection {
+  const entrances = changeEntrance(
+    collection.entrances ?? [],
+    kind,
+    place,
+    location,
+  );
+  const favorites = collection.favorites.map((item) => {
+    const target = kind === 'company' ? item.anchor : item.community;
+    if (
+      target.id !== place.id ||
+      (target.originalLocation ?? target.location) !==
+        (place.originalLocation ?? place.location)
+    )
+      return item;
+    const updated = applyEntrance(target, kind, entrances);
+    if (updated.location === target.location) return item;
+    const next = {
+      ...item,
+      ...(kind === 'company'
+        ? { anchor: updated }
+        : { community: { ...item.community, ...updated } }),
+      verification: undefined,
+    };
+    return { ...next, id: communityChoiceKey(next.anchor, next.community) };
+  });
+  const next = {
+    ...collection,
+    entrances,
+    favorites: [...new Map(favorites.map((f) => [f.id, f])).values()],
+  };
+  if (JSON.stringify(next).length * 2 > COLLECTION_MAX_BYTES)
+    throw new Error('本机收藏与入口记录空间不足，请先整理。');
+  return next;
 }

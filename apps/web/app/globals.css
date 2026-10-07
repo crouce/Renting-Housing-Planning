@@ -3073,3 +3073,59 @@ input[type='checkbox'] {
 .community-controls .update-menu {
   flex-basis: 100%;
 }
+/* User-confirmed entrance correction; overlay does not block map selection. */
+.entrance-picker {
+  position: absolute;
+  right: 20px;
+  bottom: 60px;
+  z-index: 1000;
+  width: min(360px, calc(100% - 40px));
+  padding: 16px;
+  background: #fff;
+  border: 2px solid #176653;
+  border-radius: 14px;
+  box-shadow: 0 8px 30px #183e3226;
+  font-size: 13px;
+}
+.entrance-picker p {
+  margin: 8px 0;
+}
+.entrance-picker label,
+.entrance-picker small {
+  display: block;
+  margin: 6px 0;
+}
+.entrance-picker input {
+  width: 100%;
+  padding: 7px;
+  border: 1px solid #bccdc7;
+  border-radius: 6px;
+}
+.entrance-picker > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.entrance-picker button {
+  border: 1px solid #b3ccc2;
+  border-radius: 6px;
+  padding: 7px;
+}
+.entrance-marker {
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: #fff;
+  color: #174c3e;
+  border: 2px solid #176653;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.selected-place-card > button {
+  font-size: 11px;
+  padding: 5px;
+  border: 1px solid #d0dfd9;
+  border-radius: 6px;
+  flex-shrink: 0;
+  max-width: 80px;
+}

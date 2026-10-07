@@ -190,8 +190,8 @@ export async function POST(request: Request) {
       new URLSearchParams({
         origin: community.location,
         destination: anchor.location,
-        originpoi: community.id,
-        destinationpoi: anchor.id,
+        ...(community.originalLocation ? {} : { originpoi: community.id }),
+        ...(anchor.originalLocation ? {} : { destinationpoi: anchor.id }),
         city1: seed.citycode,
         city2: seed.citycode,
         strategy: '8',

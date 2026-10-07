@@ -43,7 +43,12 @@ export function FavoriteVerification({
     time,
     budget,
     disabled,
-    favorites.map((item) => item.id).sort(),
+    favorites
+      .map(
+        (item) =>
+          `${item.id}:${item.community.location}:${item.anchor.location}`,
+      )
+      .sort(),
   ]);
   useEffect(() => {
     controller.current?.abort();

@@ -21,6 +21,12 @@ import {
 } from '@/lib/community-collection';
 import { favoriteSeed } from '@/lib/favorite-recheck';
 import {
+  applyEntrance,
+  NO_ENTRANCES,
+  type Entrance,
+  type EntranceKind,
+} from '@/lib/entrances';
+import {
   readCommunityCache,
   readCommunityHistory,
   writeCommunityCache,
@@ -74,6 +80,8 @@ export function CommunityExplorer({
   onFavorite,
   onRemoveFavorite,
   onIgnore,
+  entrances = NO_ENTRANCES,
+  onEditEntrance,
 }: {
   seeds: BoardingStation[];
   anchor: TransitStop;
@@ -89,6 +97,8 @@ export function CommunityExplorer({
   onFavorite: (item: Favorite, onlyIfSaved?: boolean) => void;
   onRemoveFavorite: (id: string) => void;
   onIgnore: (id: string, ignored: boolean) => void;
+  entrances?: Entrance[];
+  onEditEntrance?: (kind: EntranceKind, place: TransitStop) => void;
 }) {
   const groups = useMemo(() => {
     const grouped = new Map<
@@ -119,7 +129,12 @@ export function CommunityExplorer({
     groups.slice(0, 3).map((group) => group.id),
   );
   const [radius, setRadius] = useState(500);
-  const [communities, setCommunities] = useState<Community[]>([]);
+  const [rawCommunities, setCommunities] = useState<Community[]>([]);
+  const communities = useMemo(
+    () =>
+      rawCommunities.map((item) => applyEntrance(item, 'community', entrances)),
+    [rawCommunities, entrances],
+  );
   const [pages, setPages] = useState<PageState>({});
   const [verifications, setVerifications] = useState<
     Record<string, CommunityVerification>
@@ -158,6 +173,12 @@ export function CommunityExplorer({
   const [walkingFilter, setWalkingFilter] = useState('all');
   const [expiryTick, setExpiryTick] = useState(0);
   const controllerRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    setBusy('');
+    setActiveId(undefined);
+  }, [entrances]);
   const selected = groups.filter((group) => selectedGroups.includes(group.id));
   const cacheKey = JSON.stringify([
     'communities:v2',
@@ -287,7 +308,7 @@ export function CommunityExplorer({
             return seed
               ? [
                   communityRouteKey(
-                    community,
+                    applyEntrance(community, 'community', entrances),
                     anchor,
                     seed,
                     departureDate,
@@ -346,7 +367,7 @@ export function CommunityExplorer({
     controllerRef.current = controller;
     setErrors([]);
     setMessage('');
-    let found = communities;
+    let found = rawCommunities;
     const newPages = { ...pages };
     const newVerifications = verifications;
     const failures: string[] = [];
@@ -1075,6 +1096,22 @@ export function CommunityExplorer({
                                 : '需要更新 · 尚未核验'}
                           </p>
                           <p>{community.address || '高德暂无详细地址'}</p>
+                          <p className="community-hint">
+                            {community.originalLocation
+                              ? '已使用校正入口，位置改变后须重新核验。'
+                              : '当前使用高德 POI 位置，可校正为实际大门。'}
+                          </p>
+                          {onEditEntrance && (
+                            <button
+                              type="button"
+                              disabled={Boolean(busy) || disabled}
+                              onClick={() =>
+                                onEditEntrance('community', community)
+                              }
+                            >
+                              校正小区入口
+                            </button>
+                          )}
                           <small>
                             距所选站点最近直线{' '}
                             {Math.round(community.distanceMeters)} 米

@@ -2,6 +2,12 @@
 
 import { useCommunityCollection } from '@/components/use-community-collection';
 import { CommunityFavorites } from '@/components/community-favorites';
+import { EntrancePicker, type EntranceMap } from '@/components/entrance-picker';
+import {
+  applyEntrance,
+  type EntranceRequest,
+  type EntranceKind,
+} from '@/lib/entrances';
 import {
   LocalDataControls,
   type ClearLocalAction,
@@ -9,7 +15,7 @@ import {
 import { mergeBackupCollection, type LocalBackup } from '@/lib/local-backup';
 import { emptyCollection } from '@/lib/community-collection';
 import { overlappingCommunities, pinLabel } from '@/lib/community-map';
-import type { Community } from '@/lib/community-types';
+import type { Community, TransitStop } from '@/lib/community-types';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -76,6 +82,7 @@ import {
 } from '@/lib/local-memory';
 
 type PlaceTip = {
+  originalLocation?: string;
   id: string;
   name: string;
   district: string;
@@ -197,7 +204,7 @@ type RememberedCommuteResult = {
 
 type AMapOverlay = { setMap(map: AMapMap | null): void };
 type AMapMarker = AMapOverlay;
-type AMapMap = {
+type AMapMap = EntranceMap & {
   getCenter(): { toJSON(): [number, number] };
   getZoom(): number;
   setZoomAndCenter(
@@ -464,6 +471,40 @@ export function CommutePlanner() {
   );
   const [memoryMessage, setMemoryMessage] = useState('');
   const [localDataBusy, setLocalDataBusy] = useState(false);
+  const [entranceRequest, setEntranceRequest] =
+    useState<EntranceRequest | null>(null);
+  const entranceMarker = useCallback((location: string, label: string) => {
+    const node = document.createElement('span');
+    node.className = 'entrance-marker';
+    node.textContent = label;
+    return new amapRef.current!.Marker({
+      map: mapRef.current,
+      position: parseLocation(location),
+      content: node,
+      zIndex: 9999,
+      anchor: 'bottom-center',
+    });
+  }, []);
+  function editEntrance(kind: EntranceKind, place: TransitStop) {
+    if (!mapRef.current || !amapRef.current) return;
+    setEntranceRequest({
+      kind,
+      place,
+      onSave: (location) => {
+        if (!collection.adjustEntrance(kind, place, location))
+          throw new Error('入口保存失败，请检查本机容量。');
+        if (kind === 'company' && selectedPlace?.id === place.id)
+          selectPlace(
+            {
+              ...selectedPlace,
+              location,
+              originalLocation: place.originalLocation ?? place.location,
+            },
+            false,
+          );
+      },
+    });
+  }
   const [stationMemory, setStationMemory] = useState<{
     savedAt: number;
     stale: boolean;
@@ -775,6 +816,7 @@ export function CommutePlanner() {
   }, []);
 
   function resetReachability() {
+    setEntranceRequest(null);
     focusResultsAfterRenderRef.current = false;
     setSettingsExpanded(true);
     calculationRef.current?.abort();
@@ -890,7 +932,12 @@ export function CommutePlanner() {
         setStationMemory(null);
         setCommuteMemory(null);
       }
-      if (action !== 'queries') collection.replace(emptyCollection());
+      if (action !== 'queries')
+        collection.replace(
+          action === 'collection'
+            ? { ...emptyCollection(), entrances: collection.entrances }
+            : emptyCollection(),
+        );
       if (action === 'all') {
         clearPlannerMemory();
         skipMemoryWriteRef.current = true;
@@ -906,7 +953,8 @@ export function CommutePlanner() {
     const merged = mergeBackupCollection(collection, backup.collection);
     if (restore && backup.planner) {
       const preferences = backup.planner.preferences;
-      if (preferences.selectedPlace) selectPlace(preferences.selectedPlace);
+      if (preferences.selectedPlace)
+        selectPlace(preferences.selectedPlace, false);
       else {
         handleQueryChange('');
         setStationState('idle');
@@ -934,7 +982,9 @@ export function CommutePlanner() {
     collection.replace(merged);
   }
 
-  function selectPlace(place: PlaceTip) {
+  function selectPlace(place: PlaceTip, useSavedEntrance = true) {
+    if (useSavedEntrance)
+      place = applyEntrance(place, 'company', collection.entrances ?? []);
     setSelectedPlace(place);
     setQuery(place.name);
     setTips([]);
@@ -2261,6 +2311,19 @@ export function CommutePlanner() {
 
               {selectedPlace && (
                 <div className="selected-place-card">
+                  <button
+                    type="button"
+                    disabled={
+                      mapState !== 'ready' || reachabilityState === 'loading'
+                    }
+                    onClick={() => editEntrance('company', selectedPlace)}
+                  >
+                    校正公司入口
+                    {selectedPlace.originalLocation &&
+                    selectedPlace.location !== selectedPlace.originalLocation
+                      ? ' · 已校正'
+                      : ''}
+                  </button>
                   <div className="selected-place-icon">
                     <Building2 aria-hidden="true" />
                   </div>
@@ -2866,6 +2929,8 @@ export function CommutePlanner() {
               onMapChange={drawCommunityMap}
               favorites={collection.favorites}
               ignored={collection.ignored}
+              entrances={collection.entrances}
+              onEditEntrance={editEntrance}
               onFavorite={collection.save}
               onRemoveFavorite={collection.remove}
               onIgnore={collection.ignore}
@@ -2881,6 +2946,7 @@ export function CommutePlanner() {
             </section>
           )}
           <CommunityFavorites
+            onEditEntrance={editEntrance}
             favorites={collection.favorites}
             onRemove={collection.remove}
             anchor={selectedPlace}
@@ -2902,6 +2968,14 @@ export function CommutePlanner() {
         </aside>
 
         <div className="map-panel" aria-label="地图区域">
+          {entranceRequest && mapRef.current && (
+            <EntrancePicker
+              request={entranceRequest}
+              map={mapRef.current}
+              marker={entranceMarker}
+              onClose={() => setEntranceRequest(null)}
+            />
+          )}
           <div className="map-view-toolbar" aria-label="地图视图">
             <div>
               <button
