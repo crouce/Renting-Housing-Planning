@@ -14,6 +14,8 @@ export type Favorite = {
   community: Community;
   anchor: TransitStop;
   savedAt: number;
+  seed?: BoardingStation;
+  imported?: boolean;
   date: string;
   time: string;
   route: {
@@ -70,6 +72,23 @@ export function makeFavorite(
     date,
     time,
     savedAt: Date.now(),
+    seed: {
+      id: seed.id,
+      directionId: seed.directionId,
+      citycode: seed.citycode,
+      lineId: seed.lineId,
+      lineName: seed.lineName,
+      directionLabel: seed.directionLabel,
+      station: { ...seed.station },
+      accessStation: { ...seed.accessStation },
+      stops: seed.stops.map((stop) => ({
+        id: stop.id,
+        name: stop.name,
+        location: stop.location,
+      })),
+      transitSeconds: seed.transitSeconds,
+      companyWalkSeconds: seed.companyWalkSeconds,
+    },
     route: {
       lineName: seed.lineName,
       directionLabel: seed.directionLabel,
@@ -131,6 +150,7 @@ export function currentFavoriteProof(
   const today = new Date(now + 8 * 60 * 60_000).toISOString().slice(0, 10);
   return Boolean(
     anchor &&
+    !item.imported &&
     item.anchor.id === anchor.id &&
     item.anchor.location === anchor.location &&
     item.date === date &&

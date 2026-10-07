@@ -2813,6 +2813,14 @@ export function CommutePlanner() {
             budget={budget}
             remember={rememberLocally}
             notice={collection.notice}
+            seeds={communitySeeds}
+            disabled={
+              reachabilityState === 'loading' ||
+              Boolean(retryingDirectionId) ||
+              invalidDate
+            }
+            onSave={collection.save}
+            onMapChange={drawCommunityMap}
           />
         </aside>
 

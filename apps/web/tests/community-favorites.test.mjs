@@ -4,36 +4,48 @@ import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
-let code = ts.transpileModule(
-  readFileSync(
-    new URL('../components/community-favorites.tsx', import.meta.url),
-    'utf8',
-  ),
-  {
-    compilerOptions: {
-      module: ts.ModuleKind.ESNext,
-      target: ts.ScriptTarget.ES2022,
-      jsx: ts.JsxEmit.ReactJSX,
+function componentCode(name) {
+  let code = ts.transpileModule(
+    readFileSync(
+      new URL('../components/' + name + '.tsx', import.meta.url),
+      'utf8',
+    ),
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        jsx: ts.JsxEmit.ReactJSX,
+      },
     },
-  },
-).outputText;
-code = code
-  .replace(
-    /from ['"]react['"]/g,
-    'from ' + JSON.stringify(import.meta.resolve('react')),
-  )
-  .replace(
-    '"react/jsx-runtime"',
-    JSON.stringify(import.meta.resolve('react/jsx-runtime')),
-  )
-  .replace(
-    /from ['"]@\/lib\/([^'"]+)['"]/g,
-    (_, name) =>
-      'from ' +
-      JSON.stringify(new URL('../lib/' + name + '.ts', import.meta.url).href),
-  );
+  ).outputText;
+  code = code
+    .replace(
+      /from ['"]\.\/([^'"]+)['"]/g,
+      (_, child) =>
+        'from ' +
+        JSON.stringify(
+          'data:text/javascript,' + encodeURIComponent(componentCode(child)),
+        ),
+    )
+    .replace(
+      /from ['"]react['"]/g,
+      'from ' + JSON.stringify(import.meta.resolve('react')),
+    )
+    .replace(
+      '"react/jsx-runtime"',
+      JSON.stringify(import.meta.resolve('react/jsx-runtime')),
+    )
+    .replace(
+      /from ['"]@\/lib\/([^'"]+)['"]/g,
+      (_, name) =>
+        'from ' +
+        JSON.stringify(new URL('../lib/' + name + '.ts', import.meta.url).href),
+    );
+  return code;
+}
 const { CommunityFavorites } = await import(
-  'data:text/javascript,' + encodeURIComponent(code)
+  'data:text/javascript,' +
+    encodeURIComponent(componentCode('community-favorites'))
 );
 const item = {
   id: 'a',

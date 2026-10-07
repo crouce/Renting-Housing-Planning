@@ -1,11 +1,13 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { FavoriteVerification } from './favorite-verification';
+import type { CommunityMapSelection } from '@/lib/community-map';
 import { formatDuration } from '@/lib/duration';
 import {
   currentFavoriteProof,
   type Favorite,
 } from '@/lib/community-collection';
-import type { TransitStop } from '@/lib/community-types';
+import type { BoardingStation, TransitStop } from '@/lib/community-types';
 
 export function CommunityFavorites({
   favorites,
@@ -16,6 +18,10 @@ export function CommunityFavorites({
   budget,
   remember,
   notice,
+  seeds = [],
+  disabled = false,
+  onSave,
+  onMapChange,
 }: {
   favorites: Favorite[];
   onRemove: (id: string) => void;
@@ -25,9 +31,15 @@ export function CommunityFavorites({
   budget: number;
   remember: boolean;
   notice: string;
+  seeds?: BoardingStation[];
+  disabled?: boolean;
+  onSave?: (item: Favorite, onlyIfSaved?: boolean) => void;
+  onMapChange?: (selection: CommunityMapSelection) => void;
 }) {
   const [checked, setChecked] = useState<string[]>([]);
   const [, tick] = useState(0);
+  const cards = useRef(new Map<string, HTMLElement>());
+  const [located, setLocated] = useState<string>();
   useEffect(() => {
     const timer = window.setInterval(() => tick((n) => n + 1), 30_000);
     return () => window.clearInterval(timer);
@@ -46,6 +58,32 @@ export function CommunityFavorites({
       : item.verification
         ? '历史或条件不同 · 待重新核验'
         : '尚未核验';
+  function locate(item: Favorite) {
+    setLocated(item.id);
+    onMapChange?.({
+      communities: [item.community],
+      activeId: item.community.id,
+      source: 'favorites',
+      focus: true,
+      anchor: item.anchor,
+      states: {
+        [item.community.id]: {
+          favorite: true,
+          status: currentFavoriteProof(item, anchor, date, time)
+            ? item.verification!.totalSeconds! <= budget * 60
+              ? 'reachable'
+              : 'over_budget'
+            : 'pending',
+        },
+      },
+      onSelect: () => {
+        cards.current.get(item.id)?.focus({ preventScroll: true });
+        cards.current
+          .get(item.id)
+          ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      },
+    });
+  }
   return (
     <section className="community-favorites" aria-label="收藏与对比">
       <h2>
@@ -69,7 +107,15 @@ export function CommunityFavorites({
       )}
       <div className="favorite-list">
         {favorites.map((item) => (
-          <article key={item.id}>
+          <article
+            key={item.id}
+            tabIndex={-1}
+            className={located === item.id ? 'is-located' : ''}
+            ref={(node) => {
+              if (node) cards.current.set(item.id, node);
+              else cards.current.delete(item.id);
+            }}
+          >
             <label>
               <input
                 type="checkbox"
@@ -97,19 +143,49 @@ export function CommunityFavorites({
                 <small>{state(item)}</small>
               </span>
             </label>
-            <button
-              type="button"
-              aria-label={`移除收藏${item.community.name}（${item.anchor.name}）`}
-              onClick={() => {
-                setChecked((current) => current.filter((id) => id !== item.id));
-                onRemove(item.id);
-              }}
-            >
-              移除
-            </button>
+            <div className="favorite-item-actions">
+              {onMapChange && (
+                <button
+                  type="button"
+                  aria-label={`定位收藏${item.community.name}`}
+                  onClick={() => locate(item)}
+                >
+                  定位
+                </button>
+              )}
+              <button
+                type="button"
+                aria-label={`移除收藏${item.community.name}（${item.anchor.name}）`}
+                onClick={() => {
+                  setChecked((current) =>
+                    current.filter((id) => id !== item.id),
+                  );
+                  onRemove(item.id);
+                }}
+              >
+                移除
+              </button>
+            </div>
           </article>
         ))}
       </div>
+      {located && (
+        <p className="community-hint">
+          地图展示收藏位置与对应公司，不代表已重新核验路线。
+        </p>
+      )}
+      {onSave && (
+        <FavoriteVerification
+          favorites={favorites}
+          anchor={anchor}
+          date={date}
+          time={time}
+          budget={budget}
+          seeds={seeds}
+          disabled={disabled}
+          onSave={onSave}
+        />
+      )}
       {chosen.length === 1 && (
         <p className="community-hint">再选 1 个小区即可对比。</p>
       )}

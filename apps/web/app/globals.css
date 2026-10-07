@@ -1781,6 +1781,66 @@ input {
 .favorite-list button {
   flex-shrink: 0;
 }
+.favorite-list article.is-located {
+  border-color: #187e64;
+}
+.favorite-item-actions {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+.favorite-recheck {
+  margin: 14px 0;
+  padding: 12px;
+  background: #eef5f1;
+  border-radius: 10px;
+  font-size: 12px;
+}
+.favorite-recheck summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.favorite-recheck-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid #dce5df;
+}
+.favorite-recheck-option small {
+  display: block;
+  line-height: 1.5;
+  color: #627b72;
+  margin-top: 4px;
+}
+.favorite-recheck input {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.favorite-recheck button {
+  padding: 8px 10px;
+  margin: 8px 6px 0 0;
+  border-radius: 7px;
+  border: 1px solid #c9ddd4;
+  background: #fff;
+  cursor: pointer;
+}
+.favorite-recheck button:disabled,
+.favorite-recheck-option:has(input:disabled) {
+  opacity: 0.6;
+}
+.favorite-recheck-confirm {
+  margin-top: 10px;
+  border: 1px solid #c9ddd4;
+  background: #fff;
+  padding: 12px;
+  border-radius: 8px;
+  line-height: 1.7;
+}
+.favorite-recheck-confirm ul {
+  margin: 8px 0;
+  padding-left: 18px;
+}
 .favorite-comparison {
   overflow-x: auto;
   max-width: 100%;
