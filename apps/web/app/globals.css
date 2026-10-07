@@ -3129,3 +3129,63 @@ input[type='checkbox'] {
   flex-shrink: 0;
   max-width: 80px;
 }
+.commute-comparison {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #bfd3ca;
+  border-radius: 10px;
+  background: #f5faf7;
+  font-size: 12px;
+}
+.commute-comparison h4 {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.commute-comparison p {
+  margin: 7px 0;
+  line-height: 1.6;
+}
+.comparison-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 0;
+  border-bottom: 1px solid #dce6e0;
+}
+.comparison-option input {
+  margin-top: 3px;
+  accent-color: #176653;
+}
+.commute-comparison small {
+  display: block;
+  color: #60746a;
+  margin-top: 4px;
+}
+.commute-comparison button {
+  padding: 7px 9px;
+  margin: 6px 6px 0 0;
+  border: 1px solid #c5d7ce;
+  border-radius: 6px;
+  background: #fff;
+}
+.commute-comparison button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.comparison-confirm,
+.comparison-results article {
+  border: 1px solid #cfdfd7;
+  padding: 10px;
+  margin: 10px 0;
+  border-radius: 8px;
+  background: #fff;
+}
+.comparison-results b {
+  display: inline-block;
+  color: #14614b;
+  background: #e7f3ec;
+  padding: 3px 5px;
+  font-size: 11px;
+  margin-top: 5px;
+}

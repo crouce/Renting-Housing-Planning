@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MapPin } from 'lucide-react';
+import { CommunityComparison } from './community-comparison';
 import type { CommunityMapSelection } from '@/lib/community-map';
 export type { CommunityMapSelection } from '@/lib/community-map';
 import { formatDuration } from '@/lib/duration';
@@ -141,6 +142,8 @@ export function CommunityExplorer({
   >({});
   const [choices, setChoices] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState('');
+  const [comparisonId, setComparisonId] = useState<string>();
+  const [comparisonBusy, setComparisonBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [errors, setErrors] = useState<string[]>([]);
   const [searched, setSearched] = useState(false);
@@ -362,6 +365,7 @@ export function CommunityExplorer({
     return data as T;
   }
   async function search(more = false, refresh = false, failedOnly = false) {
+    if (comparisonBusy) return;
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -463,7 +467,7 @@ export function CommunityExplorer({
     });
   }
   async function verify(items: Community[], refresh = false) {
-    if (disabled || busy) return;
+    if (disabled || busy || comparisonBusy) return;
     // Single and batch paths share the same exclusion, limit, and freshness guard.
     items = items
       .filter((item) => !ignored.includes(communityChoiceKey(anchor, item)))
@@ -1198,6 +1202,21 @@ export function CommunityExplorer({
                           <div className="community-card-actions">
                             <button
                               type="button"
+                              disabled={
+                                Boolean(busy) || disabled || comparisonBusy
+                              }
+                              onClick={() =>
+                                setComparisonId((id) =>
+                                  id === community.id
+                                    ? undefined
+                                    : community.id,
+                                )
+                              }
+                            >
+                              对比候选通勤方案
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => {
                                 selectCommunity(community.id);
                               }}
@@ -1222,6 +1241,72 @@ export function CommunityExplorer({
                                 : '补查此小区'}
                             </button>
                           </div>
+                          {comparisonId === community.id && (
+                            <CommunityComparison
+                              community={community}
+                              anchor={anchor}
+                              seeds={community.seedIds.flatMap((id) => {
+                                const s = seedsById.get(id);
+                                return s ? [s] : [];
+                              })}
+                              date={departureDate}
+                              time={departureTime}
+                              budget={budgetMinutes}
+                              proofs={verifications}
+                              disabled={Boolean(busy) || disabled || excluded}
+                              onBusy={setComparisonBusy}
+                              onProof={(task, result) =>
+                                setVerifications((previous) => {
+                                  const next = {
+                                    ...previous,
+                                    [task.key]: result,
+                                  };
+                                  save({
+                                    communities: rawCommunities,
+                                    pages,
+                                    choices,
+                                    verifications: next,
+                                  });
+                                  return next;
+                                })
+                              }
+                              onChoose={(option) => {
+                                const next = {
+                                  ...choices,
+                                  [community.id]: option.id,
+                                };
+                                setChoices(next);
+                                selectCommunity(community.id);
+                                const proof =
+                                  verifications[
+                                    communityRouteKey(
+                                      community,
+                                      anchor,
+                                      option,
+                                      departureDate,
+                                      departureTime,
+                                    )
+                                  ];
+                                onFavorite(
+                                  makeFavorite(
+                                    community,
+                                    anchor,
+                                    option,
+                                    departureDate,
+                                    departureTime,
+                                    proof,
+                                  ),
+                                  true,
+                                );
+                                save({
+                                  communities: rawCommunities,
+                                  pages,
+                                  choices: next,
+                                  verifications,
+                                });
+                              }}
+                            />
+                          )}
                         </div>
                       </details>
                     </article>
