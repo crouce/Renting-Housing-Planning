@@ -45,6 +45,7 @@ export async function searchDirection<T>(options: {
   count: number;
   previous?: Observation<T>[];
   limit?: number;
+  signal?: AbortSignal;
   check: (index: number) => Promise<Omit<Observation<T>, 'index'>>;
 }) {
   const observed = new Map(
@@ -53,6 +54,7 @@ export async function searchDirection<T>(options: {
   const attempted = new Set<number>();
   const limit = options.limit ?? CHECKS_PER_DIRECTION;
   while (attempted.size < limit) {
+    options.signal?.throwIfAborted();
     const summary = summarizeBoundary(options.count, [...observed.values()]);
     if (summary.confirmed) break;
     const eligible = (index: number) =>
@@ -95,6 +97,7 @@ export async function searchDirection<T>(options: {
     try {
       value = await options.check(next);
     } catch {
+      options.signal?.throwIfAborted();
       value = { status: 'error', errorCode: 'CHECK_FAILED' };
     }
     observed.set(next, { index: next, ...value });

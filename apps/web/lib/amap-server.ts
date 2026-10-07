@@ -49,7 +49,12 @@ export function readServerEnv(name: AMapEnvName): string | undefined {
 export async function amapRequest<T extends AMapEnvelope>(
   pathname: string,
   params: URLSearchParams,
-  options: { retries?: number; timeoutMilliseconds?: number } = {},
+  options: {
+    retries?: number;
+    timeoutMilliseconds?: number;
+    signal?: AbortSignal;
+    onRequest?: () => void;
+  } = {},
 ): Promise<T> {
   const key = readServerEnv('AMAP_WEB_SERVICE_KEY');
   if (!key) {
@@ -69,13 +74,21 @@ export async function amapRequest<T extends AMapEnvelope>(
 
   const attempts = 1 + (options.retries ?? 1);
   for (let attempt = 0; attempt < attempts; attempt++) {
+    options.signal?.throwIfAborted();
     let response: Response;
     try {
+      options.onRequest?.();
+      const timeout = AbortSignal.timeout(
+        options.timeoutMilliseconds ?? 12_000,
+      );
       response = await fetch(url, {
         headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(options.timeoutMilliseconds ?? 12_000),
+        signal: options.signal
+          ? AbortSignal.any([options.signal, timeout])
+          : timeout,
       });
     } catch {
+      options.signal?.throwIfAborted();
       if (attempt < attempts - 1) {
         await new Promise((resolve) => setTimeout(resolve, 350));
         continue;

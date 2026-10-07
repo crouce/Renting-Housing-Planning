@@ -15,6 +15,47 @@ import type {
   DirectionSummary,
 } from '@/lib/reachability-types';
 
+import { validDepartureDate } from '@/lib/departure-date';
+import type {
+  CalculationEvent,
+  CalculationProgress,
+} from '@/lib/calculation-stream';
+
+type Work = {
+  signal: AbortSignal;
+  streaming: boolean;
+  progress: CalculationProgress;
+  emit: (event: CalculationEvent<ReachabilityResult>) => void;
+};
+function report(work?: Work) {
+  if (work && !work.signal.aborted)
+    work.emit({ type: 'progress', progress: structuredClone(work.progress) });
+}
+function reuse(
+  work: Work | undefined,
+  kind: 'walking' | 'lines' | 'transit',
+  count = 1,
+) {
+  if (work) {
+    work.progress.reused[kind] += count;
+    report(work);
+  }
+}
+function requestOptions(
+  work: Work | undefined,
+  kind: 'walking' | 'lines' | 'transit',
+) {
+  return {
+    signal: work?.signal,
+    onRequest: () => {
+      if (work) {
+        work.progress.requests[kind]++;
+        report(work);
+      }
+    },
+  };
+}
+
 type TransitMode = 'BUS' | 'SUBWAY' | 'LIGHT_RAIL';
 
 type ReachabilityRequest = {
@@ -239,6 +280,8 @@ type ReachabilityResult = {
   routeCheckCount: number;
   selectedAccessStationCount: number;
   partial: boolean;
+  incomplete?: boolean;
+  progress?: CalculationProgress;
   issues: CalculationIssue[];
   cachedDirectionCount: number;
   accessStationBudgets: AccessStationBudget[];
@@ -394,11 +437,16 @@ async function expandTransitLine(
   lineName: string,
   citycode: string,
   refresh = false,
+  work?: Work,
 ) {
   const key = `${citycode}:${normalizeLineName(lineName)}`;
   const cached = refresh ? undefined : lineCache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    reuse(work, 'lines');
+    return cached;
+  }
   await paceRequest();
+  work?.signal.throwIfAborted();
   const result = await amapRequest<BusLineResponse>(
     '/v3/bus/linename',
     new URLSearchParams({
@@ -408,6 +456,7 @@ async function expandTransitLine(
       offset: '20',
       page: '1',
     }),
+    requestOptions(work, 'lines'),
   );
 
   const normalizedRequestedName = normalizeLineName(lineName);
@@ -535,6 +584,7 @@ async function planWalking(
   accessStation: AccessStation,
   budgetSeconds: number,
   refresh = false,
+  work?: Work,
 ): Promise<AccessStationWithWalk> {
   const key = JSON.stringify([
     anchor.id,
@@ -543,7 +593,8 @@ async function planWalking(
     accessStation.location,
   ]);
   const cached = refresh ? undefined : walkingCache.get(key);
-  if (cached)
+  if (cached) {
+    reuse(work, 'walking');
     return {
       ...cached,
       ...accessStation,
@@ -552,6 +603,7 @@ async function planWalking(
         budgetSeconds - cached.walkingDurationSeconds,
       ),
     };
+  }
   const params = new URLSearchParams({
     origin: anchor.location!,
     destination: accessStation.location,
@@ -566,7 +618,11 @@ async function planWalking(
     const result = await amapRequest<WalkingResponse>(
       '/v5/direction/walking',
       params,
-      { retries: 1, timeoutMilliseconds: 8_000 },
+      {
+        retries: 1,
+        timeoutMilliseconds: 8_000,
+        ...requestOptions(work, 'walking'),
+      },
     );
     const paths = (result.route?.paths ?? [])
       .map((path) => ({
@@ -608,6 +664,7 @@ async function checkTransit(
   departureDate: string,
   departureTime: string,
   anchorLocation: string,
+  work?: Work,
 ): Promise<Omit<Observation<ReachableStation>, 'index'>> {
   const accessStation = context.accessStation;
   const params = new URLSearchParams({
@@ -628,7 +685,11 @@ async function checkTransit(
     const result = await amapRequest<TransitResponse>(
       '/v5/direction/transit/integrated',
       params,
-      { retries: 0, timeoutMilliseconds: 8_000 },
+      {
+        retries: 0,
+        timeoutMilliseconds: 8_000,
+        ...requestOptions(work, 'transit'),
+      },
     );
     const routes = (result.route?.transits ?? [])
       .flatMap((route) => {
@@ -717,6 +778,7 @@ async function checkTransit(
       route,
     };
   } catch (error) {
+    work?.signal.throwIfAborted();
     return {
       status: 'error',
       errorCode:
@@ -734,6 +796,7 @@ async function evaluateLineDirection(
   anchorLocation: string,
   refresh: boolean,
   resume: boolean,
+  work?: Work,
 ): Promise<DirectionEvaluation> {
   const key = JSON.stringify([
     'route-evidence-v3',
@@ -783,7 +846,10 @@ async function evaluateLineDirection(
     refresh,
     resume,
   ]);
-  const pending = pendingDirections.get(pendingKey);
+  // Cancellable streams own their upstream requests; one viewer stopping must not cancel another.
+  const pending = work?.streaming
+    ? undefined
+    : pendingDirections.get(pendingKey);
   if (pending) {
     const value = await pending;
     return {
@@ -792,10 +858,13 @@ async function evaluateLineDirection(
       summary: { ...value.summary, cached: true, routeCheckCount: 0 },
     };
   }
+  reuse(work, 'transit', previous.filter((item) => item.route).length);
+  const checkpoints = new Map(previous.map((item) => [item.index, item]));
   const calculate = async (): Promise<Omit<DirectionEvaluation, 'context'>> => {
     const searched = await searchDirection<ReachableStation>({
       count: context.candidates.length,
       previous,
+      signal: work?.signal,
       // An unchanged result is a fast read. Explicitly resume incomplete work;
       // changed budgets or expired evidence must be evaluated again.
       limit:
@@ -805,16 +874,28 @@ async function evaluateLineDirection(
         previous.length === cached.observations.length
           ? 0
           : undefined,
-      check: async (index) => ({
-        ...(await checkTransit(
-          context.candidates[index],
-          context,
-          departureDate,
-          departureTime,
-          anchorLocation,
-        )),
-        checkedAt: Date.now(),
-      }),
+      check: async (index) => {
+        const value = {
+          ...(await checkTransit(
+            context.candidates[index],
+            context,
+            departureDate,
+            departureTime,
+            anchorLocation,
+            work,
+          )),
+          checkedAt: Date.now(),
+        };
+        checkpoints.set(index, { index, ...value });
+        // Persist each completed checkpoint before another request, including when
+        // this direction is stopped halfway through its round.
+        directionCache.set(
+          key,
+          { budgetSeconds, observations: [...checkpoints.values()] },
+          10 * 60_000,
+        );
+        return value;
+      },
     });
     const best = searched.best?.route ?? null;
     const observations = searched.observations;
@@ -913,11 +994,11 @@ async function evaluateLineDirection(
     return value;
   };
   const task = calculate();
-  pendingDirections.set(pendingKey, task);
+  if (!work?.streaming) pendingDirections.set(pendingKey, task);
   try {
     return { ...(await task), context };
   } finally {
-    pendingDirections.delete(pendingKey);
+    if (!work?.streaming) pendingDirections.delete(pendingKey);
   }
 }
 
@@ -930,10 +1011,17 @@ async function evaluateDirection(
   refresh: boolean,
   resume: boolean,
   signal: AbortSignal,
+  work?: Work,
+  onDirection?: (result: DirectionReachability) => void,
 ): Promise<DirectionReachability> {
   const evaluations: DirectionEvaluation[] = [];
   for (const context of contexts) {
     signal.throwIfAborted();
+    if (work) {
+      work.progress.phase = 'routes';
+      work.progress.label = `${context.accessStation.name} · ${context.requestedLineName} · ${context.directionLabel}`;
+      report(work);
+    }
     evaluations.push(
       await evaluateLineDirection(
         context,
@@ -942,9 +1030,21 @@ async function evaluateDirection(
         anchorLocation,
         refresh,
         resume,
+        work,
       ),
     );
+    if (work) {
+      work.progress.completedDirections = evaluations.length;
+      report(work);
+    }
+    onDirection?.(summarizeEvaluations(evaluations, activeAccessStations));
   }
+  return summarizeEvaluations(evaluations, activeAccessStations);
+}
+function summarizeEvaluations(
+  evaluations: DirectionEvaluation[],
+  activeAccessStations: AccessStationWithWalk[],
+): DirectionReachability {
   const reachable = evaluations
     .flatMap((item) => (item.best ? [item.best] : []))
     .sort((a, b) => b.straightLineMeters - a.straightLineMeters);
@@ -988,7 +1088,25 @@ async function evaluateDirection(
   };
 }
 
-export async function POST(request: Request) {
+async function calculate(
+  request: Request,
+  emit: Work['emit'] = () => {},
+  streaming = false,
+  signal = request.signal,
+) {
+  const work: Work = {
+    signal: signal,
+    streaming,
+    emit,
+    progress: {
+      phase: 'walking',
+      label: '准备查询',
+      completedDirections: 0,
+      totalDirections: 0,
+      requests: { walking: 0, lines: 0, transit: 0 },
+      reused: { walking: 0, lines: 0, transit: 0 },
+    },
+  };
   let body: ReachabilityRequest;
   try {
     body = (await request.json()) as ReachabilityRequest;
@@ -999,6 +1117,11 @@ export async function POST(request: Request) {
     );
   }
 
+  if (!body || typeof body !== 'object')
+    return Response.json(
+      { error: { message: '查询格式不正确。' } },
+      { status: 400 },
+    );
   const anchor = body.anchor;
   const budgetMinutes = Number(body.budgetMinutes);
   const departureDate = body.departureDate ?? '';
@@ -1013,14 +1136,17 @@ export async function POST(request: Request) {
     !Number.isInteger(budgetMinutes) ||
     budgetMinutes < 20 ||
     budgetMinutes > 90 ||
-    !datePattern.test(departureDate) ||
+    !validDepartureDate(departureDate) ||
     !timePattern.test(departureTime) ||
     requestedAccessStations.length < 1 ||
     requestedAccessStations.length > 3
   ) {
     return Response.json(
       {
-        error: { code: 'INVALID_PARAMETERS', message: '通勤计算参数不完整。' },
+        error: {
+          code: 'INVALID_PARAMETERS',
+          message: '请检查通勤条件，出发日期不能早于今天（北京时间）。',
+        },
       },
       { status: 400 },
     );
@@ -1122,15 +1248,19 @@ export async function POST(request: Request) {
       accessStations,
       0,
       async (station) => {
-        request.signal.throwIfAborted();
+        work.progress.label = `接驳步行 · ${station.name}`;
+        report(work);
+        signal.throwIfAborted();
         try {
           return await planWalking(
             validatedAnchor,
             station,
             budgetMinutes * 60,
             refresh,
+            work,
           );
         } catch {
+          signal.throwIfAborted();
           issues.push({
             id: `walk:${station.id}`,
             accessStationId: station.id,
@@ -1156,16 +1286,19 @@ export async function POST(request: Request) {
           message: '本站还没有线路信息，请更新附近站点后再试。',
         });
     }
+    work.progress.phase = 'lines';
     const lineSeeds = selectLineSeeds(activeAccessStations);
     const queries = new Map<string, Promise<AMapBusLine[]>>();
     const contexts: LineDirectionContext[] = [];
     for (const seed of lineSeeds) {
-      request.signal.throwIfAborted();
+      work.progress.label = `线路站序 · ${seed.lineName}`;
+      report(work);
+      signal.throwIfAborted();
       const queryKey = `${seed.citycode}:${normalizeLineName(seed.lineName)}`;
       if (!queries.has(queryKey))
         queries.set(
           queryKey,
-          expandTransitLine(seed.lineName, seed.citycode, refresh),
+          expandTransitLine(seed.lineName, seed.citycode, refresh, work),
         );
       try {
         const lines = await queries.get(queryKey)!;
@@ -1186,6 +1319,7 @@ export async function POST(request: Request) {
           });
         contexts.push(...resolved);
       } catch {
+        signal.throwIfAborted();
         issues.push({
           id: `line:${seed.accessStation.id}:${normalizeLineName(seed.lineName)}`,
           accessStationId: seed.accessStation.id,
@@ -1212,18 +1346,16 @@ export async function POST(request: Request) {
     const allCandidates = selectedContexts.flatMap(
       (context) => context.candidates,
     );
-    const to = await evaluateDirection(
-      selectedContexts,
-      activeAccessStations,
-      departureDate,
-      departureTime,
-      validatedAnchor.location,
-      refresh,
-      Boolean(retryDirectionId || body.resume),
-      request.signal,
-    );
-    const result: ReachabilityResult = {
+    work.progress.totalDirections = selectedContexts.length;
+    work.progress.phase = 'routes';
+    report(work);
+    const buildResult = (
+      to: DirectionReachability,
+      incomplete: boolean,
+    ): ReachabilityResult => ({
       sampled: true,
+      incomplete,
+      progress: structuredClone(work.progress),
       candidateSource: 'transit_lines',
       budgetMinutes,
       networkSpanMeters: Math.max(
@@ -1255,9 +1387,86 @@ export async function POST(request: Request) {
         usable: station.remainingTransitSeconds > 0,
       })),
       directions: { to },
-    };
+    });
+    const to = await evaluateDirection(
+      selectedContexts,
+      activeAccessStations,
+      departureDate,
+      departureTime,
+      validatedAnchor.location,
+      refresh,
+      Boolean(retryDirectionId || body.resume),
+      signal,
+      work,
+      (partial) =>
+        emit({ type: 'snapshot', result: buildResult(partial, true) }),
+    );
+    const result = buildResult(to, false);
     return Response.json(result);
   } catch (error) {
+    signal.throwIfAborted();
     return amapErrorResponse(error);
   }
+}
+
+export async function POST(request: Request) {
+  if (!request.headers.get('accept')?.includes('application/x-ndjson'))
+    return calculate(request);
+  const cancellation = new AbortController();
+  const abort = () => cancellation.abort();
+  request.signal.addEventListener('abort', abort, { once: true });
+  if (request.signal.aborted) abort();
+  const encoder = new TextEncoder();
+  let closed = false;
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit: Work['emit'] = (event) => {
+        if (!closed && !cancellation.signal.aborted)
+          controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'));
+      };
+      try {
+        const response = await calculate(
+          request,
+          emit,
+          true,
+          cancellation.signal,
+        );
+        const data = (await response.json()) as ReachabilityResult & {
+          error?: { message?: string };
+        };
+        emit(
+          response.ok
+            ? { type: 'result', result: data }
+            : {
+                type: 'error',
+                message: data.error?.message ?? '通勤计算失败。',
+              },
+        );
+      } catch {
+        if (!cancellation.signal.aborted)
+          emit({
+            type: 'error',
+            message: '计算连接中断，已完成结果保留，请继续补查。',
+          });
+      } finally {
+        request.signal.removeEventListener('abort', abort);
+        if (!closed) {
+          closed = true;
+          controller.close();
+        }
+      }
+    },
+    cancel() {
+      closed = true;
+      cancellation.abort();
+      request.signal.removeEventListener('abort', abort);
+    },
+  });
+  return new Response(body, {
+    headers: {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Accel-Buffering': 'no',
+    },
+  });
 }

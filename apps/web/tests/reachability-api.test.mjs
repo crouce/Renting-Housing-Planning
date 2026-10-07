@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { readCalculationStream } from '../lib/calculation-stream.ts';
 
 // Exercise the real POST handler with deterministic upstream replies. Only
 // AMap I/O is replaced; request validation, line matching and caches are real.
@@ -9,7 +10,11 @@ const adapter = `
 export class AMapServerError extends Error {
   constructor(message, code, statusCode) { super(message); this.code = code; this.statusCode = statusCode; }
 }
-export const amapRequest = (...args) => globalThis[Symbol.for('commute.test.amap')](...args);
+export const amapRequest = (path, params, options = {}) => {
+  options.signal?.throwIfAborted();
+  options.onRequest?.();
+  return globalThis[Symbol.for('commute.test.amap')](path, params, options);
+};
 export const amapErrorResponse = (error) => Response.json({error:{message:error.message}}, {status:500});
 `;
 const source = readFileSync(
@@ -128,7 +133,7 @@ const station = (id, names) => ({
 const body = {
   anchor: { id: 'company', name: '工作地点', location: '114.400000,30.462000' },
   budgetMinutes: 35,
-  departureDate: '2026-10-03',
+  departureDate: '2099-10-03',
   departureTime: '08:30',
   accessStations: [station('access-a', ['2号线'])],
 };
@@ -145,6 +150,120 @@ async function post(value) {
 }
 const summary = (result) =>
   result.directions.to.accessRoutes.flatMap((group) => group.directions);
+
+test('stream stop retains each checked stop; resume reuses completed evidence and reports real calls', async () => {
+  const realTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, _delay, ...args) =>
+    realTimeout(callback, 0, ...args);
+  try {
+    calls.length = 0;
+    const controller = new AbortController();
+    const create = (signal, value) =>
+      POST(
+        new Request('http://localhost/api/amap/reachability', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/x-ndjson',
+          },
+          body: JSON.stringify(value),
+          signal,
+        }),
+      );
+    const response = await create(controller.signal, {
+      ...body,
+      refresh: true,
+    });
+    assert.match(response.headers.get('content-type'), /ndjson/);
+    const snapshots = [],
+      progress = [];
+    await assert.rejects(
+      readCalculationStream(
+        response,
+        (event) => {
+          if (event.type === 'progress') progress.push(event.progress);
+          if (event.type === 'snapshot') {
+            snapshots.push(event.result);
+            if (event.result.progress.completedDirections === 1)
+              controller.abort();
+          }
+        },
+        controller.signal,
+      ),
+      { name: 'AbortError' },
+    );
+    // Allow the already-started call to settle before auditing future calls.
+    await new Promise((resolve) => realTimeout(resolve, 30));
+    const callsAfterStop = calls.length;
+    await new Promise((resolve) => realTimeout(resolve, 30));
+    assert.equal(
+      calls.length,
+      callsAfterStop,
+      'abort must stop upstream work, not only stop rendering',
+    );
+    assert.equal(snapshots.length, 1);
+    assert.equal(snapshots[0].incomplete, true);
+    assert.equal(summary(snapshots[0]).length, 1);
+    assert.equal(snapshots[0].progress.totalDirections, 2);
+    assert.equal(snapshots[0].progress.requests.walking, 1);
+    assert.equal(snapshots[0].progress.requests.lines, 1);
+    assert.ok(progress.some((item) => item.requests.transit > 0));
+    const completedOrigins = new Set(
+      calls
+        .filter((call) => call.path.includes('transit'))
+        .map((call) => call.origin),
+    );
+    calls.length = 0;
+    let final;
+    const resumed = await create(new AbortController().signal, {
+      ...body,
+      resume: true,
+    });
+    await readCalculationStream(
+      resumed,
+      (event) => {
+        if (event.type === 'result') final = event.result;
+      },
+      new AbortController().signal,
+    );
+    assert.equal(final.incomplete, false);
+    assert.equal(final.progress.completedDirections, 2);
+    assert.equal(summary(final).length, 2);
+    assert.equal(final.progress.requests.transit, calls.length);
+    assert.equal(final.progress.requests.walking, 0);
+    assert.equal(final.progress.requests.lines, 0);
+    assert.ok(
+      final.progress.reused.walking > 0 &&
+        final.progress.reused.lines > 0 &&
+        final.progress.reused.transit > 0,
+    );
+    assert.ok(
+      calls.every((call) => !completedOrigins.has(call.origin)),
+      'no completed checkpoint is requested twice',
+    );
+  } finally {
+    globalThis.setTimeout = realTimeout;
+  }
+});
+
+test('past departure dates reject before consuming AMap quota in both JSON and streamed mode', async () => {
+  calls.length = 0;
+  const request = (accept) =>
+    new Request('http://localhost/api/amap/reachability', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: accept },
+      body: JSON.stringify({ ...body, departureDate: '2000-01-01' }),
+    });
+  assert.equal((await POST(request('application/json'))).status, 400);
+  await assert.rejects(
+    readCalculationStream(
+      await POST(request('application/x-ndjson')),
+      () => {},
+      new AbortController().signal,
+    ),
+  );
+  assert.equal(calls.length, 0);
+});
 
 test('POST preserves independent precision, strict direct routes, reuse, and targeted retry', async () => {
   const realTimeout = globalThis.setTimeout;

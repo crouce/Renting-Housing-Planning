@@ -2051,6 +2051,102 @@ input {
   color: #66736e;
   font-size: 11px;
 }
+.map-view-toolbar {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  z-index: 4;
+  max-width: calc(100% - 40px);
+  display: grid;
+  gap: 6px;
+  padding: 7px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #d3dcd7;
+  border-radius: 12px;
+  box-shadow: 0 5px 18px #17201d12;
+}
+.map-view-toolbar > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.map-view-toolbar button,
+.departure-date-notice button,
+.calculation-progress-panel button {
+  border: 1px solid #d3dcd7;
+  border-radius: 7px;
+  background: #fff;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.map-view-toolbar button[aria-pressed='true'],
+.calculation-progress-panel button {
+  color: #fff;
+  border-color: #174d40;
+  background: #174d40;
+}
+.map-view-toolbar button:disabled,
+.calculation-progress-panel button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.departure-date-notice,
+.calculation-progress-panel {
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid #cadfd6;
+  border-radius: 12px;
+  background: #f0f7f4;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.departure-date-notice {
+  border-color: #e8cca0;
+  background: #fff8ea;
+}
+.departure-date-notice > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.departure-date-notice label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.departure-date-notice input {
+  max-width: 160px;
+  min-width: 0;
+  padding: 5px;
+  border: 1px solid #d3dcd7;
+  border-radius: 5px;
+}
+.departure-date-notice p,
+.calculation-progress-panel p {
+  margin: 6px 0 10px;
+}
+.calculation-progress-panel output {
+  display: grid;
+  gap: 3px;
+}
+.calculation-progress-panel progress {
+  width: 100%;
+  height: 7px;
+  accent-color: #174d40;
+}
+.calculation-progress-panel small {
+  display: block;
+  margin-top: 8px;
+  color: #586b63;
+}
+@media (max-width: 1150px) {
+  .map-view-toolbar {
+    top: 116px;
+    left: 14px;
+  }
+}
 .station-map-dot {
   display: block;
   width: 13px;

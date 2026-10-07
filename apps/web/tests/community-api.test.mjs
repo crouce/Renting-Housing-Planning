@@ -129,7 +129,7 @@ test('community API filters residential POIs, paginates, reuses search, verifies
       seed,
       anchor,
       budgetMinutes: 35,
-      departureDate: '2026-10-03',
+      departureDate: '2099-10-03',
       departureTime: '08:30',
     };
     result = await (await post(verify)).json();

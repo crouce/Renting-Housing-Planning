@@ -32,6 +32,19 @@ import {
 } from '@/components/community-explorer';
 import { mergeDirectionResult } from '@/lib/merge-direction-result';
 import { formatDuration } from '@/lib/duration';
+import { chinaDate, validDepartureDate } from '@/lib/departure-date';
+import {
+  readCalculationStream,
+  type CalculationProgress as Progress,
+} from '@/lib/calculation-stream';
+import { CalculationProgress } from '@/components/calculation-progress';
+import {
+  captureViewport,
+  restoreViewport,
+  visibleMapRoutes,
+  type MapView,
+  type Viewport,
+} from '@/lib/map-view';
 import type {
   CalculationIssue,
   DirectionSummary,
@@ -145,6 +158,8 @@ type ReachabilityResult = {
   routeCheckCount: number;
   selectedAccessStationCount: number;
   partial: boolean;
+  incomplete?: boolean;
+  progress?: Progress;
   issues: CalculationIssue[];
   cachedDirectionCount: number;
   accessStationBudgets: Array<{
@@ -171,6 +186,13 @@ type RememberedCommuteResult = {
 type AMapOverlay = { setMap(map: AMapMap | null): void };
 type AMapMarker = AMapOverlay;
 type AMapMap = {
+  getCenter(): { toJSON(): [number, number] };
+  getZoom(): number;
+  setZoomAndCenter(
+    zoom: number,
+    center: [number, number],
+    immediately: boolean,
+  ): void;
   setCenter(position: [number, number]): void;
   setZoom(zoom: number): void;
   setFitView(
@@ -255,9 +277,7 @@ function parseLocation(location: string): [number, number] {
 }
 
 function tomorrowAsInputValue() {
-  const date = new Date();
-  date.setDate(date.getDate() + 1);
-  return date.toISOString().slice(0, 10);
+  return chinaDate(Date.now(), 1);
 }
 
 function stationMemoryKey(place: PlaceTip, radius: number) {
@@ -363,7 +383,22 @@ export function CommutePlanner() {
   const overlaysRef = useRef<AMapOverlay[]>([]);
   const anchorMarkerRef = useRef<AMapMarker | null>(null);
   const communityMapActiveRef = useRef(false);
-  const [mapView, setMapView] = useState<'transit' | 'communities'>('transit');
+  const [mapView, setMapView] = useState<MapView>('transit');
+  const mapViewRef = useRef<MapView>('transit');
+  const mapViewportsRef = useRef<Partial<Record<MapView, Viewport>>>({});
+  const onlyCurrentRef = useRef(false);
+  const [onlyCurrentRoute, setOnlyCurrentRoute] = useState(false);
+  const communitySelectionRef = useRef<CommunityMapSelection>({
+    communities: [],
+  });
+  const [hasCommunityMap, setHasCommunityMap] = useState(false);
+  const manualMapChoiceRef = useRef(false);
+  const latestResultRef = useRef<ReachabilityResult | null>(null);
+  const latestActiveRouteRef = useRef<string | null>(null);
+  const [calculationProgress, setCalculationProgress] =
+    useState<Progress | null>(null);
+  const [calculationStopped, setCalculationStopped] = useState(false);
+  const resumeDirectionRef = useRef<string | undefined>(undefined);
   const restoredSelectionRef = useRef<{
     stationIds: string[];
     lineKeys: string[];
@@ -399,6 +434,8 @@ export function CommutePlanner() {
   const [budget, setBudget] = useState(45);
   const [departureDate, setDepartureDate] = useState(tomorrowAsInputValue);
   const [departureTime, setDepartureTime] = useState('08:30');
+  const [today, setToday] = useState(() => chinaDate());
+  const invalidDate = !validDepartureDate(departureDate, today);
   const [memoryReady, setMemoryReady] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(true);
   const [memoryClearNonce, setMemoryClearNonce] = useState(0);
@@ -414,6 +451,16 @@ export function CommutePlanner() {
     stale: boolean;
     fallback: boolean;
   } | null>(null);
+
+  useEffect(() => {
+    const update = () => setToday(chinaDate());
+    const timer = window.setInterval(update, 60_000);
+    window.addEventListener('focus', update);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', update);
+    };
+  }, []);
 
   useEffect(() => {
     if (!commuteMemory || commuteMemory.stale) return;
@@ -711,6 +758,15 @@ export function CommutePlanner() {
     calculationRef.current?.abort();
     calculationRef.current = null;
     setRetryingDirectionId(null);
+    setCalculationProgress(null);
+    setCalculationStopped(false);
+    latestResultRef.current = null;
+    latestActiveRouteRef.current = null;
+    mapViewRef.current = 'transit';
+    mapViewportsRef.current = {};
+    communitySelectionRef.current = { communities: [] };
+    setHasCommunityMap(false);
+    manualMapChoiceRef.current = false;
     setReachability(null);
     setReachabilityState('idle');
     setActiveRouteId(null);
@@ -840,8 +896,9 @@ export function CommutePlanner() {
       const AMap = amapRef.current;
       const map = mapRef.current;
       if (!AMap || !map) return;
-      communityMapActiveRef.current = false;
+      mapViewRef.current = 'transit';
       setMapView('transit');
+      communityMapActiveRef.current = false;
       clearMapOverlays();
       const anchor = anchorMarkerRef.current;
       if (anchor) {
@@ -938,14 +995,35 @@ export function CommutePlanner() {
     }
   }
 
+  const enterMapView = useCallback((view: MapView, restore: boolean) => {
+    const map = mapRef.current;
+    if (!map) return undefined;
+    if (mapViewRef.current !== view) {
+      mapViewportsRef.current[mapViewRef.current] = captureViewport(map);
+    }
+    mapViewRef.current = view;
+    setMapView(view);
+    return restore ? mapViewportsRef.current[view] : undefined;
+  }, []);
+
   const drawReachabilityMap = useCallback(
-    (data: ReachabilityResult, activeStation: ReachableStation) => {
+    (
+      data: ReachabilityResult,
+      activeStation: ReachableStation,
+      restore = false,
+      keepViewport = false,
+      overview = false,
+    ) => {
       const AMap = amapRef.current;
       const map = mapRef.current;
       if (!AMap || !map) return;
 
+      const previousViewport =
+        keepViewport && mapViewRef.current === 'transit'
+          ? captureViewport(map)
+          : undefined;
+      const rememberedViewport = enterMapView('transit', restore);
       communityMapActiveRef.current = false;
-      setMapView('transit');
       clearMapOverlays();
       const focusOverlays: AMapOverlay[] = [];
       const anchor = anchorMarkerRef.current;
@@ -962,7 +1040,12 @@ export function CommutePlanner() {
           .filter((routeId): routeId is string => Boolean(routeId)),
       );
       representativeRouteIds.add(activeStation.logicalId);
-      const overviewRoutes = data.directions.to.stations
+      const displayedRoutes = visibleMapRoutes(
+        data.directions.to.stations,
+        onlyCurrentRef.current,
+        activeStation.logicalId,
+      );
+      const overviewRoutes = displayedRoutes
         .filter(
           (station) =>
             representativeRouteIds.has(station.logicalId) &&
@@ -1076,7 +1159,12 @@ export function CommutePlanner() {
       focusOverlays.push(...routeStopMarkers);
 
       const startMarkers = stations
-        .filter((station) => selectedStationIds.includes(station.id))
+        .filter(
+          (station) =>
+            selectedStationIds.includes(station.id) &&
+            (!onlyCurrentRef.current ||
+              station.id === activeStation.accessStation.id),
+        )
         .map(
           (station, index) =>
             new AMap.Marker({
@@ -1091,7 +1179,7 @@ export function CommutePlanner() {
       overlaysRef.current.push(...startMarkers);
       focusOverlays.push(...startMarkers);
 
-      const candidateMarkers = data.directions.to.stations.map((station) => {
+      const candidateMarkers = displayedRoutes.map((station) => {
         const isActive = station.logicalId === activeStation.logicalId;
         const isFarthest =
           station.logicalId === data.directions.to.farthest?.logicalId;
@@ -1116,13 +1204,30 @@ export function CommutePlanner() {
         return marker;
       });
       overlaysRef.current.push(...candidateMarkers);
-      map.setFitView(focusOverlays, false, [90, 70, 90, 430]);
+      if (previousViewport ?? rememberedViewport)
+        restoreViewport(map, (previousViewport ?? rememberedViewport)!);
+      else
+        map.setFitView(
+          overview ? overlaysRef.current : focusOverlays,
+          true,
+          [100, 60, 90, 60],
+        );
     },
-    [clearMapOverlays, selectedStationIds, stations],
+    [clearMapOverlays, selectedStationIds, stations, enterMapView],
   );
 
   const drawCommunityMap = useCallback(
-    (selection: CommunityMapSelection) => {
+    (selection: CommunityMapSelection, restore = false) => {
+      communitySelectionRef.current = selection;
+      setHasCommunityMap(selection.communities.length > 0);
+      // Restoring a local list or receiving background updates must not steal a manually chosen route view.
+      if (
+        !restore &&
+        manualMapChoiceRef.current &&
+        mapViewRef.current === 'transit' &&
+        !selection.activeId
+      )
+        return;
       const AMap = amapRef.current;
       const map = mapRef.current;
       if (
@@ -1131,9 +1236,23 @@ export function CommutePlanner() {
         (!selection.communities.length && !communityMapActiveRef.current)
       )
         return;
+      if (!selection.communities.length) {
+        const data = latestResultRef.current;
+        const route =
+          data?.directions.to.stations.find(
+            (item) => item.logicalId === latestActiveRouteRef.current,
+          ) ?? data?.directions.to.farthest;
+        if (data && route) drawReachabilityMap(data, route, true);
+        else {
+          clearMapOverlays();
+          communityMapActiveRef.current = false;
+          enterMapView('transit', false);
+        }
+        return;
+      }
+      const rememberedViewport = enterMapView('communities', restore);
       clearMapOverlays();
-      communityMapActiveRef.current = selection.communities.length > 0;
-      setMapView(selection.communities.length ? 'communities' : 'transit');
+      communityMapActiveRef.current = true;
       const focus: AMapOverlay[] = [];
       const anchor = anchorMarkerRef.current;
       if (anchor) {
@@ -1199,24 +1318,47 @@ export function CommutePlanner() {
           focus.push(marker);
         }
       }
-      if (focus.length)
+      if (rememberedViewport) restoreViewport(map, rememberedViewport);
+      else if (focus.length)
         // The sidebar is outside the map; reserve equal padding inside its own viewport.
-        map.setFitView(focus, false, [100, 100, 100, 100]);
+        map.setFitView(focus, true, [100, 60, 90, 60]);
     },
-    [clearMapOverlays],
+    [clearMapOverlays, enterMapView, drawReachabilityMap],
   );
+
+  function switchMapView(view: MapView) {
+    manualMapChoiceRef.current = true;
+    if (view === mapViewRef.current) return;
+    if (view === 'communities')
+      drawCommunityMap(communitySelectionRef.current, true);
+    else {
+      const data = latestResultRef.current;
+      const route =
+        data?.directions.to.stations.find(
+          (item) => item.logicalId === latestActiveRouteRef.current,
+        ) ?? data?.directions.to.farthest;
+      if (data && route) drawReachabilityMap(data, route, true);
+    }
+  }
 
   const applyReachabilityResult = useCallback(
     (
       data: ReachabilityResult,
       preferredRouteId: string | null,
       memory: { savedAt: number; stale: boolean; fallback: boolean } | null,
+      incremental = false,
     ) => {
+      const hadResult = Boolean(latestResultRef.current);
+      latestResultRef.current = data;
       setReachability(data);
       setReachabilityState('ready');
       setSettingsExpanded(false);
       setReachabilityError('');
       setCommuteMemory(memory);
+      if (!incremental) {
+        setCalculationProgress(data.progress ?? null);
+        setCalculationStopped(Boolean(data.incomplete));
+      }
       const initialStation =
         data.directions.to.stations.find(
           (station) => station.logicalId === preferredRouteId,
@@ -1225,10 +1367,19 @@ export function CommutePlanner() {
         data.directions.to.stations[0];
       if (initialStation) {
         setActiveRouteId(initialStation.logicalId);
-        drawReachabilityMap(data, initialStation);
+        latestActiveRouteRef.current = initialStation.logicalId;
+        if (!incremental || mapViewRef.current === 'transit')
+          drawReachabilityMap(
+            data,
+            initialStation,
+            false,
+            incremental && hadResult,
+          );
       } else {
         setActiveRouteId(null);
-        drawNearbyStations(stations);
+        latestActiveRouteRef.current = null;
+        if (!incremental || mapViewRef.current === 'transit')
+          drawNearbyStations(stations);
       }
     },
     [drawReachabilityMap, drawNearbyStations, stations],
@@ -1241,7 +1392,9 @@ export function CommutePlanner() {
       !selectedPlace ||
       selectedStationIds.length === 0 ||
       stationState !== 'ready' ||
-      reachabilityState !== 'idle'
+      reachabilityState !== 'idle' ||
+      calculationStopped ||
+      Boolean(calculationRef.current)
     ) {
       return;
     }
@@ -1272,6 +1425,7 @@ export function CommutePlanner() {
     departureTime,
     memoryReady,
     reachabilityState,
+    calculationStopped,
     rememberLocally,
     selectedLineKeys,
     selectedPlace,
@@ -1281,7 +1435,9 @@ export function CommutePlanner() {
 
   function activateRoute(station: ReachableStation) {
     if (!reachability || station.routeGeometry.length === 0) return;
+    manualMapChoiceRef.current = true;
     setActiveRouteId(station.logicalId);
+    latestActiveRouteRef.current = station.logicalId;
     drawReachabilityMap(reachability, station);
     if (rememberLocally && selectedPlace) {
       const key = commuteMemoryKey(
@@ -1305,7 +1461,14 @@ export function CommutePlanner() {
     skipLocal = false,
   ) {
     const place = selectedPlace;
-    if (!place || selectedStationIds.length === 0) return;
+    if (
+      !place ||
+      selectedStationIds.length === 0 ||
+      !validDepartureDate(departureDate)
+    ) {
+      setSettingsExpanded(true);
+      return;
+    }
     const previous = reachability;
     const retryGroup = retryDirectionId
       ? previous?.directions.to.accessRoutes.find((group) =>
@@ -1324,8 +1487,13 @@ export function CommutePlanner() {
     const controller = new AbortController();
     calculationRef.current = controller;
     setRetryingDirectionId(retryDirectionId ?? 'all');
+    resumeDirectionRef.current = retryDirectionId;
+    setCalculationStopped(false);
+    setCalculationProgress(null);
+    if (!latestResultRef.current) setReachabilityState('loading');
     if (!retryDirectionId && !skipLocal) {
       setReachabilityState('loading');
+      latestResultRef.current = null;
       setReachability(null);
       setActiveRouteId(null);
       setCommuteMemory(null);
@@ -1349,7 +1517,8 @@ export function CommutePlanner() {
       !retryDirectionId &&
       !skipLocal &&
       cached &&
-      cached.expiresAt > Date.now()
+      cached.expiresAt > Date.now() &&
+      !cached.data.result.incomplete
     ) {
       applyReachabilityResult(cached.data.result, cached.data.activeRouteId, {
         savedAt: cached.createdAt,
@@ -1365,7 +1534,10 @@ export function CommutePlanner() {
       const response = await fetch('/api/amap/reachability', {
         method: 'POST',
         signal: controller.signal,
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/x-ndjson',
+        },
         body: JSON.stringify({
           refresh: forceRefresh,
           retryDirectionId,
@@ -1399,55 +1571,76 @@ export function CommutePlanner() {
             })),
         }),
       });
-      const payload = (await response.json()) as
-        | ReachabilityResult
-        | { error?: { message?: string } };
-      if (controller.signal.aborted) return;
-      if (!response.ok || !('directions' in payload)) {
-        throw new Error(
-          'error' in payload && payload.error?.message
-            ? payload.error.message
-            : '通勤圈计算失败，请稍后重试。',
-        );
-      }
-      const data =
-        retryDirectionId && previous
-          ? mergeDirectionResult(previous, payload)
-          : payload;
-      const initialStation =
-        data.directions.to.farthest ?? data.directions.to.stations[0];
-      const savedAt = Math.min(
-        Date.now(),
-        ...data.directions.to.accessRoutes.flatMap((group) =>
-          group.directions.map(
-            (direction) => direction.checkedAt ?? Date.now(),
-          ),
-        ),
-      );
-      applyReachabilityResult(
-        data,
-        retryDirectionId ? activeRouteId : (initialStation?.logicalId ?? null),
-        {
-          savedAt,
-          stale: Date.now() - savedAt >= 10 * 60_000,
-          fallback: false,
+      await readCalculationStream<ReachabilityResult>(
+        response,
+        (event) => {
+          if (
+            controller.signal.aborted ||
+            calculationRef.current !== controller
+          )
+            return;
+          if (event.type === 'progress') {
+            setCalculationProgress(event.progress);
+            return;
+          }
+          if (event.type !== 'snapshot' && event.type !== 'result') return;
+          const payload = event.result;
+          const data =
+            previous &&
+            (retryDirectionId || (skipLocal && event.type === 'snapshot'))
+              ? {
+                  ...mergeDirectionResult(previous, payload),
+                  incomplete: Boolean(
+                    payload.incomplete ||
+                    (retryDirectionId && previous.incomplete),
+                  ),
+                  progress: payload.progress,
+                }
+              : payload;
+          const savedAt = Math.min(
+            Date.now(),
+            ...data.directions.to.accessRoutes.flatMap((group) =>
+              group.directions.map(
+                (direction) => direction.checkedAt ?? Date.now(),
+              ),
+            ),
+          );
+          const preferred = latestActiveRouteRef.current ?? activeRouteId;
+          applyReachabilityResult(
+            data,
+            preferred,
+            {
+              savedAt,
+              stale: Date.now() - savedAt >= 10 * 60_000,
+              fallback: false,
+            },
+            true,
+          );
+          setCalculationProgress(data.progress ?? null);
+          if (event.type === 'result') {
+            setCalculationStopped(Boolean(data.incomplete));
+            if (data.incomplete) resumeDirectionRef.current = undefined;
+          }
+          if (rememberLocally)
+            void writeCommuteCache(
+              cacheKey,
+              {
+                result: data,
+                activeRouteId: latestActiveRouteRef.current,
+              } satisfies RememberedCommuteResult,
+              savedAt,
+            );
         },
+        controller.signal,
       );
-      if (rememberLocally) {
-        void writeCommuteCache(
-          cacheKey,
-          {
-            result: data,
-            activeRouteId: retryDirectionId
-              ? activeRouteId
-              : (initialStation?.logicalId ?? null),
-          } satisfies RememberedCommuteResult,
-          savedAt,
-        );
-      }
     } catch (error) {
       if (controller.signal.aborted) return;
-      if (retryDirectionId || (skipLocal && previous)) {
+      if (
+        latestResultRef.current ||
+        retryDirectionId ||
+        (skipLocal && previous)
+      ) {
+        setCalculationStopped(true);
         setReachabilityError(
           error instanceof Error
             ? error.message
@@ -1467,6 +1660,7 @@ export function CommutePlanner() {
         error instanceof Error ? error.message : '通勤圈计算失败。',
       );
       setReachabilityState('error');
+      setCalculationStopped(true);
       focusResultsAfterRenderRef.current = false;
       setSettingsExpanded(true);
     } finally {
@@ -1476,6 +1670,60 @@ export function CommutePlanner() {
       }
     }
   }
+
+  function stopCalculation() {
+    calculationRef.current?.abort();
+    calculationRef.current = null;
+    setRetryingDirectionId(null);
+    setCalculationStopped(true);
+    setReachabilityState(latestResultRef.current ? 'ready' : 'idle');
+    focusResultsAfterRenderRef.current = false;
+  }
+  const dateNotice = invalidDate ? (
+    <div className="departure-date-notice" role="alert">
+      <strong>
+        {departureDate && departureDate < today
+          ? `出发日期 ${departureDate} 已过期`
+          : '请选择有效的出发日期'}
+      </strong>
+      <p>
+        工作地点和常用时间已保留。请先确认日期，再发起通勤查询；旧结果仅供参考。
+      </p>
+      <div>
+        <button
+          type="button"
+          onClick={() => {
+            setDepartureDate(chinaDate());
+            resetReachability();
+          }}
+        >
+          改为今天
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setDepartureDate(chinaDate(Date.now(), 1));
+            resetReachability();
+          }}
+        >
+          改为明天
+        </button>
+        <label>
+          指定日期
+          <input
+            type="date"
+            aria-label="确认新的出发日期"
+            min={today}
+            value={departureDate}
+            onChange={(event) => {
+              setDepartureDate(event.target.value);
+              resetReachability();
+            }}
+          />
+        </label>
+      </div>
+    </div>
+  ) : null;
 
   const selectedAddress = selectedPlace
     ? [selectedPlace.district, selectedPlace.address]
@@ -1694,6 +1942,7 @@ export function CommutePlanner() {
                   </label>
                 </div>
 
+                {dateNotice}
                 <div className="onboarding-memory-row">
                   <Database aria-hidden="true" />
                   <span>
@@ -1780,6 +2029,21 @@ export function CommutePlanner() {
               <span>03</span>找小区
             </a>
           </nav>
+          {dateNotice}
+          <CalculationProgress
+            progress={calculationProgress}
+            running={Boolean(retryingDirectionId)}
+            stopped={calculationStopped}
+            invalidDate={invalidDate}
+            onStop={stopCalculation}
+            onResume={() =>
+              void calculateReachability(
+                false,
+                resumeDirectionRef.current,
+                true,
+              )
+            }
+          />
           <section id="commute-settings" className="planner-settings">
             <button
               type="button"
@@ -1970,6 +2234,7 @@ export function CommutePlanner() {
                     <Input
                       id="departure-date"
                       type="date"
+                      min={today}
                       value={departureDate}
                       onChange={(event) => {
                         setDepartureDate(event.target.value);
@@ -2207,16 +2472,19 @@ export function CommutePlanner() {
                     disabled={
                       reachabilityState === 'loading' ||
                       Boolean(retryingDirectionId) ||
-                      selectedStationIds.length === 0
+                      selectedStationIds.length === 0 ||
+                      invalidDate
                     }
                     onClick={() => void calculateReachability()}
                   >
                     <Radar />
                     {reachabilityState === 'loading'
                       ? '正在规划候选路线…'
-                      : selectedStationIds.length === 0
-                        ? '请先选择接驳站点'
-                        : `按 ${selectedStationIds.length} 个站点计算 ${budget} 分钟上班通勤圈`}
+                      : invalidDate
+                        ? '请先确认出发日期'
+                        : selectedStationIds.length === 0
+                          ? '请先选择接驳站点'
+                          : `按 ${selectedStationIds.length} 个站点计算 ${budget} 分钟上班通勤圈`}
                   </Button>
 
                   {reachabilityState === 'loading' && (
@@ -2298,7 +2566,9 @@ export function CommutePlanner() {
                       type="button"
                       disabled={
                         Boolean(retryingDirectionId) ||
-                        (!commuteMemory?.stale &&
+                        invalidDate ||
+                        (!reachability.incomplete &&
+                          !commuteMemory?.stale &&
                           !reachability.issues.length &&
                           reachability.directions.to.accessRoutes.every(
                             (group) =>
@@ -2319,7 +2589,7 @@ export function CommutePlanner() {
                       <summary>更多更新</summary>
                       <button
                         type="button"
-                        disabled={Boolean(retryingDirectionId)}
+                        disabled={Boolean(retryingDirectionId) || invalidDate}
                         onClick={() => void calculateReachability(true)}
                       >
                         全部重新查询
@@ -2346,7 +2616,7 @@ export function CommutePlanner() {
                       <strong>{reachability.candidateCount}</strong>候选站点
                     </span>
                     <span>
-                      <strong>{reachability.lineQueryCount}</strong>线路查询
+                      <strong>{reachability.lineQueryCount}</strong>线路查询组合
                     </span>
                     <span>
                       <strong>{reachability.expandedLineCount}</strong>线路方向
@@ -2422,7 +2692,9 @@ export function CommutePlanner() {
                                   if (route) activateRoute(route);
                                 }}
                                 busy={retryingDirectionId === direction.id}
-                                disabled={Boolean(retryingDirectionId)}
+                                disabled={
+                                  Boolean(retryingDirectionId) || invalidDate
+                                }
                                 onRetry={() =>
                                   void calculateReachability(
                                     false,
@@ -2460,7 +2732,7 @@ export function CommutePlanner() {
               departureTime={departureTime}
               remember={rememberLocally}
               memoryEpoch={memoryClearNonce}
-              disabled={Boolean(retryingDirectionId)}
+              disabled={Boolean(retryingDirectionId) || invalidDate}
               onMapChange={drawCommunityMap}
             />
           ) : (
@@ -2476,6 +2748,74 @@ export function CommutePlanner() {
         </aside>
 
         <div className="map-panel" aria-label="地图区域">
+          <div className="map-view-toolbar" aria-label="地图视图">
+            <div>
+              <button
+                type="button"
+                aria-pressed={mapView === 'transit'}
+                disabled={
+                  !reachability?.directions.to.stations.length ||
+                  mapState !== 'ready'
+                }
+                onClick={() => switchMapView('transit')}
+              >
+                通勤线路
+              </button>
+              <button
+                type="button"
+                aria-pressed={mapView === 'communities'}
+                disabled={!hasCommunityMap || mapState !== 'ready'}
+                onClick={() => switchMapView('communities')}
+              >
+                候选小区
+              </button>
+            </div>
+            {mapView === 'transit' &&
+            reachability?.directions.to.stations.length ? (
+              <div>
+                <button
+                  type="button"
+                  aria-pressed={!onlyCurrentRoute}
+                  onClick={() => {
+                    onlyCurrentRef.current = false;
+                    setOnlyCurrentRoute(false);
+                    const route =
+                      latestResultRef.current?.directions.to.stations.find(
+                        (item) =>
+                          item.logicalId === latestActiveRouteRef.current,
+                      );
+                    if (route && latestResultRef.current)
+                      drawReachabilityMap(
+                        latestResultRef.current,
+                        route,
+                        false,
+                        false,
+                        true,
+                      );
+                  }}
+                >
+                  查看全部路线
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={onlyCurrentRoute}
+                  onClick={() => {
+                    onlyCurrentRef.current = true;
+                    setOnlyCurrentRoute(true);
+                    const route =
+                      latestResultRef.current?.directions.to.stations.find(
+                        (item) =>
+                          item.logicalId === latestActiveRouteRef.current,
+                      );
+                    if (route && latestResultRef.current)
+                      drawReachabilityMap(latestResultRef.current, route);
+                  }}
+                >
+                  只看当前路线
+                </button>
+              </div>
+            ) : null}
+          </div>
           <div ref={mapContainerRef} className="map-canvas" />
           {mapState !== 'ready' && (
             <div className="map-loading-state">
@@ -2526,7 +2866,7 @@ export function CommutePlanner() {
                   <i className="legend-farthest" />
                   已验证最远结果
                 </span>
-                {overviewRouteCount > 1 && (
+                {overviewRouteCount > 1 && !onlyCurrentRoute && (
                   <span>
                     <i className="legend-overview-route" />
                     其他方向路线

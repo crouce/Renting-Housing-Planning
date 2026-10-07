@@ -230,7 +230,9 @@ test('retry replaces only its direction and preserves all other groups and map r
     directions: {
       to: {
         stations: [route('b', 'two', 200)],
-        accessRoutes: [{ directions: [direction('b')] }],
+        accessRoutes: [
+          { accessStationId: 'two', directions: [direction('b')] },
+        ],
       },
     },
   };
@@ -239,4 +241,21 @@ test('retry replaces only its direction and preserves all other groups and map r
   assert.equal(merged.directions.to.accessRoutes.length, 2);
   assert.deepEqual(merged.directions.to.accessRoutes[0].routeIds, ['a-route']);
   assert.equal(merged.directions.to.farthest.logicalId, 'b-route');
+  const added = mergeDirectionResult(merged, {
+    ...patch,
+    directions: {
+      to: {
+        stations: [route('c', 'three', 300)],
+        accessRoutes: [
+          { accessStationId: 'three', directions: [direction('c')] },
+        ],
+      },
+    },
+  });
+  assert.equal(
+    added.directions.to.accessRoutes.length,
+    3,
+    'streamed continuation may add a previously unprocessed access station',
+  );
+  assert.equal(added.directions.to.stations.length, 3);
 });

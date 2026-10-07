@@ -45,10 +45,34 @@ export function mergeDirectionResult<T extends Mergeable>(
     ),
     ...next.directions.to.stations,
   ].sort((a, b) => b.straightLineMeters - a.straightLineMeters);
-  const accessRoutes = previous.directions.to.accessRoutes.map((group) => {
-    const directions = group.directions.map(
-      (direction) => replacements.get(direction.id) ?? direction,
+  const groups = new Map(
+    previous.directions.to.accessRoutes.map((group) => [
+      group.accessStationId,
+      group,
+    ]),
+  );
+  for (const group of next.directions.to.accessRoutes) {
+    if (!groups.has(group.accessStationId))
+      groups.set(group.accessStationId, group);
+  }
+  const accessRoutes = [...groups.values()].map((group) => {
+    const incoming = next.directions.to.accessRoutes.find(
+      (item) => item.accessStationId === group.accessStationId,
     );
+    const directions = [
+      ...new Map([
+        ...group.directions.map(
+          (direction) =>
+            [
+              direction.id,
+              replacements.get(direction.id) ?? direction,
+            ] as const,
+        ),
+        ...(incoming?.directions ?? []).map(
+          (direction) => [direction.id, direction] as const,
+        ),
+      ]).values(),
+    ];
     const routes = stations.filter(
       (station) => station.accessStation.id === group.accessStationId,
     );

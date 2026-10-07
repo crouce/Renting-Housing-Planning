@@ -7,6 +7,7 @@ import {
 } from '@/lib/community-core';
 import type { CommunityTransit } from '@/lib/community-core';
 import type { Community, CommunityVerification } from '@/lib/community-types';
+import { validDepartureDate } from '@/lib/departure-date';
 import {
   classifyCommunity,
   communityRouteKey,
@@ -159,7 +160,7 @@ export async function POST(request: Request) {
     budgetMinutes < 20 ||
     budgetMinutes > 90 ||
     typeof departureDate !== 'string' ||
-    !/^\d{4}-\d{2}-\d{2}$/.test(departureDate) ||
+    !validDepartureDate(departureDate) ||
     !Number.isFinite(Date.parse(`${departureDate}T00:00:00+08:00`)) ||
     typeof departureTime !== 'string' ||
     !/^([01]\d|2[0-3]):[0-5]\d$/.test(departureTime)
