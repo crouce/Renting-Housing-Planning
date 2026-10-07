@@ -4,6 +4,8 @@ import {
   comparisonTask,
   comparisonWinners,
   runComparison,
+  suggestedTimes,
+  validComparisonTimes,
 } from '../lib/commute-comparison.ts';
 const home = {
   id: 'h',
@@ -135,4 +137,27 @@ test('rankings compare raw seconds, exclude expired/error evidence and never tur
   ]);
   assert.deepEqual(winners.fastest, ['a']);
   assert.deepEqual(winners.leastWalking, ['b']);
+});
+test('time comparison never crosses midnight, requires distinct times, and does not reuse another departure slot', async () => {
+  assert.deepEqual(suggestedTimes('08:30'), ['08:00', '08:15', '08:30']);
+  for (const time of ['00:00', '00:15', '23:59'])
+    assert.equal(validComparisonTimes(suggestedTimes(time)), true);
+  assert.equal(validComparisonTimes(['08:00', '08:00']), false);
+  assert.equal(validComparisonTimes(['08:00', '25:00']), false);
+  const later = comparisonTask(home, anchor, seed, '2099-01-01', '08:45');
+  assert.notEqual(later.key, first.key);
+  let calls = 0;
+  await runComparison(
+    [first, later],
+    30,
+    new AbortController().signal,
+    { [first.key]: good() },
+    () => {},
+    async (task) => {
+      calls++;
+      assert.equal(task.time, '08:45');
+      return good();
+    },
+  );
+  assert.equal(calls, 1);
 });

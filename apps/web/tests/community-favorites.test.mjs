@@ -47,6 +47,50 @@ const { CommunityFavorites } = await import(
   'data:text/javascript,' +
     encodeURIComponent(componentCode('community-favorites'))
 );
+const { CommunityComparison } = await import(
+  'data:text/javascript,' +
+    encodeURIComponent(componentCode('community-comparison'))
+);
+test('time comparison exposes bounded explicit controls and does not imply reliability or alter saved time', () => {
+  const c = {
+    id: 'h',
+    name: '测试小区',
+    location: '114,30',
+    address: '',
+    distanceMeters: 0,
+    seedIds: [],
+  };
+  const a = { id: 'a', name: '公司', location: '114.01,30.01' };
+  const seed = {
+    id: 's',
+    directionId: 'd',
+    station: c,
+    accessStation: a,
+    stops: [c, a],
+    lineName: '线路',
+    lineId: 'l',
+    directionLabel: '方向',
+    citycode: '027',
+    transitSeconds: 10,
+    companyWalkSeconds: 10,
+  };
+  const html = renderToStaticMarkup(
+    createElement(CommunityComparison, {
+      community: c,
+      anchor: a,
+      seeds: [seed],
+      date: '2099-01-01',
+      time: '08:30',
+      budget: 30,
+      mode: 'times',
+    }),
+  );
+  assert.equal((html.match(/type="time"/g) || []).length, 3);
+  assert.match(html, /不代表准点率/);
+  assert.match(html, /不覆盖收藏的常用出发时间/);
+  assert.match(html, /准备对比出发时段/);
+  assert.doesNotMatch(html, /确认开始对比/);
+});
 const item = {
   id: 'a',
   community: { name: '测试小区' },

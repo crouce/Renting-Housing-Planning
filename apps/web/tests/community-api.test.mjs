@@ -170,6 +170,24 @@ test('community API filters residential POIs, paginates, reuses search, verifies
     );
     await post({ ...verify, departureTime: '09:30' });
     assert.equal(calls.at(-1).params.time, '09-30');
+    const corrected = {
+      ...verify,
+      community: {
+        ...community,
+        originalLocation: community.location,
+        location: '114.3991,30.46',
+      },
+      anchor: {
+        ...anchor,
+        originalLocation: anchor.location,
+        location: '114.4211,30.46',
+      },
+    };
+    await post(corrected);
+    assert.equal(calls.at(-1).params.origin, '114.3991,30.46');
+    assert.equal(calls.at(-1).params.destination, '114.4211,30.46');
+    assert.equal(calls.at(-1).params.originpoi, undefined);
+    assert.equal(calls.at(-1).params.destinationpoi, undefined);
     failure = true;
     result = await (await post({ ...verify, refresh: true })).json();
     assert.equal(result.status, 'error');

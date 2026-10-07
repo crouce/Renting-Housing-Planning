@@ -32,6 +32,24 @@ const seed = {
   transitSeconds: 10,
   companyWalkSeconds: 10,
 };
+test('entrance storage and imports reject overflow or far-away corrections', () => {
+  const entries = Array.from({ length: 40 }, (_, i) => ({
+    kind: 'community',
+    id: String(i),
+    name: '入口',
+    location: '114.5001,30.5',
+    originalLocation: '114.5,30.5',
+  }));
+  assert.throws(
+    () => changeEntrance(entries, 'community', c, '114.5002,30.5'),
+    /40/,
+  );
+  const raw = JSON.parse(
+    exportLocalBackup(null, { ...emptyCollection(), entrances: entries }),
+  );
+  raw.collection.entrances[0].location = '116,31';
+  assert.throws(() => parseLocalBackup(JSON.stringify(raw)), /格式/);
+});
 test('entrance correction preserves original, separates proof keys, restores without drifting, and enforces bounds', () => {
   const entries = changeEntrance([], 'community', c, '114.5001,30.5001');
   const adjusted = applyEntrance(c, 'community', entries);

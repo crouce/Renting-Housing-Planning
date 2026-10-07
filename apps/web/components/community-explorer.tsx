@@ -156,12 +156,15 @@ export function CommunityExplorer({
     focusMapRef.current = true;
     setActiveId(id);
     setSelectionTick((tick) => tick + 1);
-    const card = cardRefs.current.get(id);
+  }, []);
+  useEffect(() => {
+    if (!activeId || !selectionTick) return;
+    const card = cardRefs.current.get(activeId);
     const details = card?.querySelector('details');
     if (details) details.open = true;
     card?.querySelector('summary')?.focus({ preventScroll: true });
     card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  }, []);
+  }, [activeId, selectionTick]);
   const clearCommunity = useCallback(() => {
     focusMapRef.current = true;
     setActiveId(undefined);
@@ -752,7 +755,9 @@ export function CommunityExplorer({
             </label>
             <button
               type="button"
-              disabled={Boolean(busy) || disabled || !selected.length}
+              disabled={
+                Boolean(busy) || comparisonBusy || disabled || !selected.length
+              }
               onClick={() => void search()}
             >
               搜索小区
@@ -905,7 +910,12 @@ export function CommunityExplorer({
                 <button
                   className="community-batch"
                   type="button"
-                  disabled={Boolean(busy) || disabled || batch.length === 0}
+                  disabled={
+                    Boolean(busy) ||
+                    comparisonBusy ||
+                    disabled ||
+                    batch.length === 0
+                  }
                   onClick={() => void verify(batch)}
                 >
                   核验所选（{batch.length} 个待补查）
@@ -1228,7 +1238,12 @@ export function CommunityExplorer({
                             </button>
                             <button
                               type="button"
-                              disabled={Boolean(busy) || disabled || excluded}
+                              disabled={
+                                Boolean(busy) ||
+                                comparisonBusy ||
+                                disabled ||
+                                excluded
+                              }
                               onClick={() =>
                                 void verify([community], Boolean(result))
                               }

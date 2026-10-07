@@ -25,7 +25,8 @@ export function validEntrance(value: unknown): value is Entrance {
     typeof e.name === 'string' &&
     e.name.length <= 160 &&
     validLocation(e.location) &&
-    validLocation(e.originalLocation),
+    validLocation(e.originalLocation) &&
+    entranceDistance(e.location, e.originalLocation) <= 3000,
   );
 }
 export function entranceDistance(a: string, b: string) {

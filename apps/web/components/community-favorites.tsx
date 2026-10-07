@@ -1,6 +1,9 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { FavoriteVerification } from './favorite-verification';
+import { CommunityComparison } from './community-comparison';
+import { favoriteSeed, favoriteRecheckIssue } from '@/lib/favorite-recheck';
+import { comparisonTask } from '@/lib/commute-comparison';
 import type { CommunityMapSelection } from '@/lib/community-map';
 import { formatDuration } from '@/lib/duration';
 import {
@@ -43,6 +46,10 @@ export function CommunityFavorites({
   const [clock, tick] = useState(0);
   const cards = useRef(new Map<string, HTMLElement>());
   const [located, setLocated] = useState<string>();
+  const [timeTarget, setTimeTarget] = useState<string>();
+  const [timeBusy, setTimeBusy] = useState(false);
+  const timed = favorites.find((item) => item.id === timeTarget);
+  const timedSeed = timed ? favoriteSeed(timed, seeds) : undefined;
   useEffect(() => {
     const timer = window.setInterval(() => tick((n) => n + 1), 30_000);
     return () => window.clearInterval(timer);
@@ -168,6 +175,16 @@ export function CommunityFavorites({
               </span>
             </label>
             <div className="favorite-item-actions">
+              <button
+                type="button"
+                disabled={disabled || timeBusy}
+                aria-label={`对比收藏${item.community.name}的出发时段`}
+                onClick={() =>
+                  setTimeTarget((id) => (id === item.id ? undefined : item.id))
+                }
+              >
+                时段对比
+              </button>
               {onMapChange && (
                 <button
                   type="button"
@@ -206,9 +223,48 @@ export function CommunityFavorites({
           time={time}
           budget={budget}
           seeds={seeds}
-          disabled={disabled}
+          disabled={disabled || timeBusy}
           onSave={onSave}
         />
+      )}
+      {timed && (
+        <section className="favorite-time-panel" aria-label="收藏时段比较">
+          <strong>{timed.community.name}</strong>
+          {favoriteRecheckIssue(timed, anchor, date, time, seeds) ? (
+            <p role="alert">
+              {favoriteRecheckIssue(timed, anchor, date, time, seeds)}
+            </p>
+          ) : (
+            anchor &&
+            timedSeed && (
+              <CommunityComparison
+                key={timed.id}
+                mode="times"
+                community={timed.community}
+                anchor={anchor}
+                seeds={[timedSeed]}
+                date={date}
+                time={time}
+                budget={budget}
+                disabled={disabled}
+                onBusy={setTimeBusy}
+                proofs={
+                  currentFavoriteProof(timed, anchor, date, time)
+                    ? {
+                        [comparisonTask(
+                          timed.community,
+                          anchor,
+                          timedSeed,
+                          date,
+                          time,
+                        ).key]: { ...timed.verification!, geometry: [] },
+                      }
+                    : undefined
+                }
+              />
+            )
+          )}
+        </section>
       )}
       {chosen.length === 1 && (
         <p className="community-hint">再选 1 个小区即可对比。</p>

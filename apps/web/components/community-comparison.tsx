@@ -5,6 +5,8 @@ import {
   comparisonWinners,
   freshComparison,
   runComparison,
+  suggestedTimes,
+  validComparisonTimes,
   type ComparisonTask,
 } from '@/lib/commute-comparison';
 import { classifyCommunity, seedIdentity } from '@/lib/cache-policy';
@@ -28,6 +30,7 @@ export function CommunityComparison({
   onProof,
   onChoose,
   onBusy,
+  mode = 'routes',
 }: {
   community: Community;
   anchor: TransitStop;
@@ -40,6 +43,7 @@ export function CommunityComparison({
   onProof?: (task: ComparisonTask, result: CommunityVerification) => void;
   onChoose?: (seed: BoardingStation) => void;
   onBusy?: (busy: boolean) => void;
+  mode?: 'routes' | 'times';
 }) {
   const [checked, setChecked] = useState<string[]>([]),
     [confirm, setConfirm] = useState(false),
@@ -48,6 +52,7 @@ export function CommunityComparison({
     [message, setMessage] = useState(''),
     [results, setResults] = useState<Record<string, CommunityVerification>>({});
   const controller = useRef<AbortController | null>(null);
+  const [times, setTimes] = useState(() => suggestedTimes(time));
   const [clock, tick] = useState(0);
   const context = JSON.stringify([
     community.id,
@@ -59,11 +64,13 @@ export function CommunityComparison({
     budget,
     seeds.map(seedIdentity),
     disabled,
+    mode,
   ]);
   useEffect(() => {
     controller.current?.abort();
     controller.current = null;
     setChecked([]);
+    setTimes(suggestedTimes(time));
     setConfirm(false);
     setBusy(false);
     setRan(false);
@@ -79,20 +86,38 @@ export function CommunityComparison({
     const timer = window.setInterval(() => tick((n) => n + 1), 30000);
     return () => window.clearInterval(timer);
   }, []);
-  const tasks = seeds
-    .filter((s) => checked.includes(s.id))
-    .map((s) => comparisonTask(community, anchor, s, date, time));
+  const tasks =
+    mode === 'times'
+      ? seeds[0] && validComparisonTimes(times)
+        ? times.map((value) =>
+            comparisonTask(community, anchor, seeds[0], date, value),
+          )
+        : []
+      : seeds
+          .filter((s) => checked.includes(s.id))
+          .map((s) => comparisonTask(community, anchor, s, date, time));
   const known = { ...proofs, ...results };
   const rows = tasks.map((task) => ({
     key: task.key,
     result: known[task.key],
   }));
   const winners = comparisonWinners(rows);
+  const durations = rows
+    .filter((row) => freshComparison(row.result))
+    .map((row) => row.result!.totalSeconds!);
   async function start() {
     if (disabled || controller.current || tasks.length < 2 || tasks.length > 3)
       return;
     const abort = new AbortController();
     controller.current = abort;
+    // Keep at most this run's three local snapshots, even after many time edits.
+    setResults(
+      Object.fromEntries(
+        tasks
+          .filter((task) => results[task.key])
+          .map((task) => [task.key, results[task.key]]),
+      ),
+    );
     setBusy(true);
     onBusy?.(true);
     setConfirm(false);
@@ -149,43 +174,105 @@ export function CommunityComparison({
   return (
     <section
       className="commute-comparison"
-      aria-label={`${community.name}的多方案对比`}
+      aria-label={`${community.name}的${mode === 'times' ? '出发时段' : '多方案'}对比`}
     >
-      <h4>同一小区多方案对比</h4>
+      <h4>
+        {mode === 'times' ? '收藏小区出发时段对比' : '同一小区多方案对比'}
+      </h4>
       <p>
-        手动选 2～3
-        条候选方案；只核验选中项，不搜索额外线路。排名仅限所选且有效的结果。
+        {mode === 'times'
+          ? '每次一个收藏、同一天 2～3 个时段，保持同一线路和上下车站。只表示规划预估差异，不代表准点率；不覆盖收藏的常用出发时间，结果仅保留在本页。'
+          : '手动选 2～3 条候选方案；只核验选中项，不搜索额外线路。排名仅限所选且有效的结果。'}
       </p>
-      {seeds.map((seed) => (
-        <label className="comparison-option" key={seed.id}>
-          <input
-            type="checkbox"
-            aria-label={`对比方案 ${seed.station.name} ${seed.lineName} ${seed.directionLabel}`}
-            checked={checked.includes(seed.id)}
-            disabled={
-              busy ||
-              disabled ||
-              (!checked.includes(seed.id) && checked.length >= 3)
-            }
-            onChange={(e) => {
-              setChecked((ids) =>
-                e.target.checked
-                  ? [...ids, seed.id]
-                  : ids.filter((id) => id !== seed.id),
-              );
-              setConfirm(false);
-              setRan(false);
-            }}
-          />
-          <span>
-            {seed.station.name} → {seed.accessStation.name}
-            <small>
-              {seed.lineName} · {seed.directionLabel}
-            </small>
-          </span>
-        </label>
-      ))}
-      {seeds.length < 2 && (
+      {mode === 'times' && (
+        <div className="comparison-times">
+          <p>
+            {seeds[0]?.lineName} · {seeds[0]?.directionLabel}
+            <br />
+            {seeds[0]?.station.name} →{' '}
+            {seeds[0]?.stops.at(-1)?.name ?? seeds[0]?.accessStation.name}
+          </p>
+          {times.map((value, index) => (
+            <label key={index}>
+              时段 {index + 1}
+              <input
+                aria-label={`对比出发时段${index + 1}`}
+                type="time"
+                value={value}
+                disabled={busy || disabled}
+                onChange={(e) => {
+                  setTimes((old) =>
+                    old.map((t, i) => (i === index ? e.target.value : t)),
+                  );
+                  setConfirm(false);
+                  setRan(false);
+                }}
+              />
+              {times.length > 2 && (
+                <button
+                  type="button"
+                  disabled={busy || disabled}
+                  onClick={() => {
+                    setTimes((old) => old.filter((_, i) => i !== index));
+                    setConfirm(false);
+                    setRan(false);
+                  }}
+                >
+                  移除此时段
+                </button>
+              )}
+            </label>
+          ))}
+          {times.length < 3 && (
+            <button
+              type="button"
+              disabled={busy || disabled}
+              onClick={() => {
+                setTimes((old) => [...old, '']);
+                setConfirm(false);
+                setRan(false);
+              }}
+            >
+              添加时段
+            </button>
+          )}
+          {!validComparisonTimes(times) && (
+            <p role="alert">请填写 2～3 个不同的有效时间。</p>
+          )}
+        </div>
+      )}
+      {mode === 'routes' &&
+        seeds.map((seed) => (
+          <label className="comparison-option" key={seed.id}>
+            <input
+              type="checkbox"
+              aria-label={`对比方案 ${seed.station.name} ${seed.lineName} ${seed.directionLabel}`}
+              checked={checked.includes(seed.id)}
+              disabled={
+                busy ||
+                disabled ||
+                (!checked.includes(seed.id) && checked.length >= 3)
+              }
+              onChange={(e) => {
+                setChecked((ids) =>
+                  e.target.checked
+                    ? [...ids, seed.id]
+                    : ids.filter((id) => id !== seed.id),
+                );
+                setConfirm(false);
+                setRan(false);
+              }}
+            />
+            <span>
+              {seed.station.name} →{' '}
+              {seed.stops.at(-1)?.name ?? seed.accessStation.name}
+              <small>
+                {seed.lineName} · {seed.directionLabel}
+              </small>
+            </span>
+          </label>
+        ))}
+      {mode === 'routes' && seeds.length < 2 && (
         <p>
           该小区当前仅有一个候选方案，可搜索其他已核验站点附近的小区后再比较。
         </p>
@@ -195,7 +282,7 @@ export function CommunityComparison({
         disabled={busy || disabled || tasks.length < 2}
         onClick={() => setConfirm(true)}
       >
-        准备对比所选方案
+        {mode === 'times' ? '准备对比出发时段' : '准备对比所选方案'}
       </button>
       {busy && (
         <button type="button" onClick={() => controller.current?.abort()}>
@@ -212,7 +299,8 @@ export function CommunityComparison({
           <p>
             {community.name} → {anchor.name}
             <br />
-            {date} · {time} 出发 · {budget} 分钟预算
+            {date} · {mode === 'times' ? times.join(' / ') : time} 出发 ·{' '}
+            {budget} 分钟预算
           </p>
           <p>
             {tasks.length} 项；预计最多提交{' '}
@@ -222,6 +310,7 @@ export function CommunityComparison({
           <ul>
             {tasks.map((t) => (
               <li key={t.key}>
+                {mode === 'times' ? `${t.time} · ` : ''}
                 {t.seed.station.name} · {t.seed.lineName} ·{' '}
                 {t.seed.directionLabel}
               </li>
@@ -238,6 +327,13 @@ export function CommunityComparison({
       {message && <p role="status">{message}</p>}
       {ran && (
         <div className="comparison-results" aria-live="polite">
+          {mode === 'times' && durations.length >= 2 && (
+            <p>
+              已核验时段耗时相差{' '}
+              {formatDuration(Math.max(...durations) - Math.min(...durations))}
+              。这是本次规划结果，不代表真实班次间隔或准点率。
+            </p>
+          )}
           {tasks.map((task) => {
             const raw = known[task.key],
               fresh = freshComparison(raw),
@@ -249,11 +345,13 @@ export function CommunityComparison({
             return (
               <article key={task.key}>
                 <strong>
+                  {mode === 'times' ? `${task.time} 出发 · ` : ''}
                   {task.seed.station.name} ·{' '}
                   {task.seed.lineName.split(/[（(]/)[0]}
                 </strong>
                 <small>
-                  {task.seed.directionLabel} → {task.seed.accessStation.name}
+                  {task.seed.directionLabel} →{' '}
+                  {task.seed.stops.at(-1)?.name ?? task.seed.accessStation.name}
                 </small>
                 <p>
                   {fresh
@@ -283,7 +381,7 @@ export function CommunityComparison({
                 {raw && (
                   <small>
                     核验于 {new Date(raw.checkedAt).toLocaleTimeString('zh-CN')}
-                    ，10 分钟有效
+                    {fresh ? '，10 分钟有效' : '，仅为核验记录，待重新核验'}
                   </small>
                 )}
                 {raw?.message && <p>{raw.message}</p>}

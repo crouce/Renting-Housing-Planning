@@ -15,6 +15,23 @@ export type ComparisonTask = {
   date: string;
   time: string;
 };
+export function suggestedTimes(time: string) {
+  const [h, m] = time.split(':').map(Number);
+  const end = h * 60 + m;
+  const start = Math.min(1409, Math.max(0, end - 30));
+  return [start, start + 15, start + 30].map(
+    (n) =>
+      `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`,
+  );
+}
+export function validComparisonTimes(times: string[]) {
+  return (
+    times.length >= 2 &&
+    times.length <= 3 &&
+    new Set(times).size === times.length &&
+    times.every((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time))
+  );
+}
 export function comparisonTask(
   community: Community,
   anchor: TransitStop,
