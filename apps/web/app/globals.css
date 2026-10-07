@@ -2707,10 +2707,56 @@ input[type='checkbox'] {
   white-space: nowrap;
 }
 .community-map-pin.is-active {
-  background: #187e64;
   font-size: 14px;
   padding: 7px 10px;
   z-index: 180;
+}
+.community-map-pin {
+  cursor: pointer;
+}
+.community-map-pin.is-reachable {
+  background: #187e64;
+}
+.community-map-pin.is-over_budget {
+  background: #ba533e;
+}
+.community-map-pin.is-favorite {
+  border-color: #f3cf73;
+}
+.community-map-pin.is-active,
+.community-map-pin:focus-visible {
+  outline: 3px solid #163f32;
+  outline-offset: 2px;
+}
+.map-overlap-picker {
+  position: absolute;
+  z-index: 210;
+  top: 150px;
+  left: 22px;
+  width: min(300px, calc(100% - 44px));
+  max-height: 55%;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid #cedbd5;
+  border-radius: 12px;
+  background: #fffffff5;
+  box-shadow: 0 6px 24px #163f3224;
+}
+.map-overlap-picker button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px;
+  border-bottom: 1px solid #dce5df;
+  cursor: pointer;
+}
+.map-overlap-picker small {
+  display: block;
+  color: #627b72;
+  margin-top: 3px;
+}
+.community-card:has(summary:focus-visible) {
+  outline: 2px solid #187e64;
 }
 .legend-community {
   background: #8061ab;

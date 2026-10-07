@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MapPin } from 'lucide-react';
+import type { CommunityMapSelection } from '@/lib/community-map';
+export type { CommunityMapSelection } from '@/lib/community-map';
 import { formatDuration } from '@/lib/duration';
 import { mergeCommunities } from '@/lib/community-core';
 import {
@@ -53,11 +55,6 @@ type SavedCommunities = {
   pages: PageState;
   verifications: Record<string, CommunityVerification>;
   choices: Record<string, string>;
-};
-export type CommunityMapSelection = {
-  communities: Community[];
-  activeId?: string;
-  verification?: CommunityVerification;
 };
 
 export function CommunityExplorer({
@@ -132,6 +129,24 @@ export function CommunityExplorer({
   const [searched, setSearched] = useState(false);
   const [onlyWithinBudget, setOnlyWithinBudget] = useState(false);
   const [activeId, setActiveId] = useState<string>();
+  const cardRefs = useRef(new Map<string, HTMLElement>());
+  const focusMapRef = useRef(false);
+  const [selectionTick, setSelectionTick] = useState(0);
+  const selectCommunity = useCallback((id: string) => {
+    focusMapRef.current = true;
+    setActiveId(id);
+    setSelectionTick((tick) => tick + 1);
+    const card = cardRefs.current.get(id);
+    const details = card?.querySelector('details');
+    if (details) details.open = true;
+    card?.querySelector('summary')?.focus({ preventScroll: true });
+    card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, []);
+  const clearCommunity = useCallback(() => {
+    focusMapRef.current = true;
+    setActiveId(undefined);
+    setSelectionTick((tick) => tick + 1);
+  }, []);
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [showIgnored, setShowIgnored] = useState(false);
   const [walkingLimits, setWalkingLimits] = useState<WalkingLimits>({
@@ -463,6 +478,7 @@ export function CommunityExplorer({
         setCheckedIds((ids) => ids.filter((id) => id !== community.id));
       save({ communities, pages, verifications: updated, choices });
       if (items.length === 1) {
+        focusMapRef.current = true;
         setActiveId(community.id);
       }
     }
@@ -562,8 +578,38 @@ export function CommunityExplorer({
       communities: visible,
       activeId: active?.id,
       verification: active ? resultFor(active) : undefined,
+      source: 'explorer',
+      focus: focusMapRef.current,
+      onSelect: selectCommunity,
+      onClear: clearCommunity,
+      states: Object.fromEntries(
+        visible.map((item) => {
+          const status = resultFor(item)?.status;
+          return [
+            item.id,
+            {
+              status:
+                status === 'reachable' || status === 'over_budget'
+                  ? status
+                  : 'pending',
+              favorite: favorites.some(
+                (saved) => saved.id === communityChoiceKey(anchor, item),
+              ),
+            },
+          ];
+        }),
+      ),
     });
-  }, [visible, activeId, onMapChange]);
+    focusMapRef.current = false;
+  }, [
+    visible,
+    activeId,
+    onMapChange,
+    favorites,
+    selectionTick,
+    selectCommunity,
+    clearCommunity,
+  ]);
 
   const moreAvailable = selected.some(
     (group) => pages[group.id]?.hasMore && pages[group.id].page < 3,
@@ -864,6 +910,10 @@ export function CommunityExplorer({
                     <article
                       className={`community-card${activeId === community.id ? ' is-active' : ''}`}
                       key={community.id}
+                      ref={(node) => {
+                        if (node) cardRefs.current.set(community.id, node);
+                        else cardRefs.current.delete(community.id);
+                      }}
                     >
                       <div className="community-card-selection">
                         <label>
@@ -1077,12 +1127,7 @@ export function CommunityExplorer({
                             <button
                               type="button"
                               onClick={() => {
-                                setActiveId(community.id);
-                                onMapChange({
-                                  communities: visible,
-                                  activeId: community.id,
-                                  verification: result,
-                                });
+                                selectCommunity(community.id);
                               }}
                             >
                               <MapPin size={14} />

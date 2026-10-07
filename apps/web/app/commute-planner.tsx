@@ -2,6 +2,8 @@
 
 import { useCommunityCollection } from '@/components/use-community-collection';
 import { CommunityFavorites } from '@/components/community-favorites';
+import { overlappingCommunities, pinLabel } from '@/lib/community-map';
+import type { Community } from '@/lib/community-types';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -395,6 +397,10 @@ export function CommutePlanner() {
     communities: [],
   });
   const [hasCommunityMap, setHasCommunityMap] = useState(false);
+  const [overlappingPins, setOverlappingPins] = useState<Community[]>([]);
+  const explorerSelectionRef = useRef<CommunityMapSelection>({
+    communities: [],
+  });
   const manualMapChoiceRef = useRef(false);
   const latestResultRef = useRef<ReachabilityResult | null>(null);
   const latestActiveRouteRef = useRef<string | null>(null);
@@ -773,6 +779,8 @@ export function CommutePlanner() {
     mapViewRef.current = 'transit';
     mapViewportsRef.current = {};
     communitySelectionRef.current = { communities: [] };
+    explorerSelectionRef.current = { communities: [] };
+    setOverlappingPins([]);
     setHasCommunityMap(false);
     manualMapChoiceRef.current = false;
     setReachability(null);
@@ -1226,6 +1234,15 @@ export function CommutePlanner() {
 
   const drawCommunityMap = useCallback(
     (selection: CommunityMapSelection, restore = false) => {
+      if (selection.source !== 'favorites') {
+        explorerSelectionRef.current = selection;
+        if (
+          !selection.focus &&
+          !restore &&
+          communitySelectionRef.current.source === 'favorites'
+        )
+          return;
+      }
       communitySelectionRef.current = selection;
       setHasCommunityMap(selection.communities.length > 0);
       // Restoring a local list or receiving background updates must not steal a manually chosen route view.
@@ -1233,7 +1250,7 @@ export function CommutePlanner() {
         !restore &&
         manualMapChoiceRef.current &&
         mapViewRef.current === 'transit' &&
-        !selection.activeId
+        !selection.focus
       )
         return;
       const AMap = amapRef.current;
@@ -1258,11 +1275,21 @@ export function CommutePlanner() {
         }
         return;
       }
-      const rememberedViewport = enterMapView('communities', restore);
+      const rememberedViewport = enterMapView(
+        'communities',
+        restore || !selection.focus,
+      );
+      setOverlappingPins([]);
       clearMapOverlays();
       communityMapActiveRef.current = true;
       const focus: AMapOverlay[] = [];
-      const anchor = anchorMarkerRef.current;
+      const anchor = selection.anchor
+        ? new AMap.Marker({
+            map,
+            position: parseLocation(selection.anchor.location),
+            title: selection.anchor.name,
+          })
+        : anchorMarkerRef.current;
       if (anchor) {
         anchor.setMap(map);
         overlaysRef.current.push(anchor);
@@ -1272,14 +1299,31 @@ export function CommutePlanner() {
         const active = community.id === selection.activeId;
         // Keep the selected door-to-door path readable in dense neighbourhoods.
         if (selection.verification?.geometry.length && !active) continue;
-        const content = document.createElement('span');
-        content.className = `community-map-pin${active ? ' is-active' : ''}`;
-        content.textContent = active ? community.name : `居${index + 1}`;
+        const state = selection.states?.[community.id];
+        const content = document.createElement('button');
+        content.type = 'button';
+        content.className = `community-map-pin is-${state?.status ?? 'pending'}${state?.favorite ? ' is-favorite' : ''}${active ? ' is-active' : ''}`;
+        content.textContent = `${state?.favorite ? '★ ' : ''}${active ? community.name : `居${index + 1}`}`;
+        content.setAttribute(
+          'aria-label',
+          `地图小区：${community.name} · ${pinLabel(state)}`,
+        );
+        content.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const neighbors = overlappingCommunities(
+            selection.communities,
+            community,
+            map.getZoom(),
+          );
+          if (!selection.activeId && neighbors.length > 1)
+            setOverlappingPins(neighbors);
+          else selection.onSelect?.(community.id);
+        });
         const marker = new AMap.Marker({
           map,
           position: parseLocation(community.location),
           content,
-          title: community.name,
+          title: `${community.name} · ${pinLabel(state)}，点击查看详情或重叠小区`,
           anchor: 'bottom-center',
           zIndex: active ? 180 : 90,
         });
@@ -1335,6 +1379,7 @@ export function CommutePlanner() {
   );
 
   function switchMapView(view: MapView) {
+    setOverlappingPins([]);
     manualMapChoiceRef.current = true;
     if (view === mapViewRef.current) return;
     if (view === 'communities')
@@ -2839,7 +2884,50 @@ export function CommutePlanner() {
                 </button>
               </div>
             ) : null}
+            {mapView === 'communities' && (
+              <button
+                type="button"
+                onClick={() => {
+                  const selection = communitySelectionRef.current;
+                  if (selection.onClear) selection.onClear();
+                  else
+                    drawCommunityMap({
+                      ...explorerSelectionRef.current,
+                      focus: true,
+                    });
+                }}
+              >
+                查看全部小区
+              </button>
+            )}
           </div>
+          {mapView === 'communities' && overlappingPins.length > 0 && (
+            <div
+              className="map-overlap-picker"
+              role="region"
+              aria-label="重叠小区选择"
+            >
+              <strong>此处有 {overlappingPins.length} 个小区</strong>
+              <button type="button" onClick={() => setOverlappingPins([])}>
+                关闭选择
+              </button>
+              {overlappingPins.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setOverlappingPins([]);
+                    communitySelectionRef.current.onSelect?.(item.id);
+                  }}
+                >
+                  {item.name}
+                  <small>
+                    {pinLabel(communitySelectionRef.current.states?.[item.id])}
+                  </small>
+                </button>
+              ))}
+            </div>
+          )}
           <div ref={mapContainerRef} className="map-canvas" />
           {mapState !== 'ready' && (
             <div className="map-loading-state">
@@ -2879,8 +2967,17 @@ export function CommutePlanner() {
               <>
                 <span>
                   <i className="legend-community" />
-                  住宅小区
+                  待核验
                 </span>
+                <span>
+                  <i style={{ background: '#187e64' }} />
+                  预算内
+                </span>
+                <span>
+                  <i style={{ background: '#ba533e' }} />
+                  超预算
+                </span>
+                <span>★ 已收藏</span>
                 <span>虚线：步行 · 实线：公共交通</span>
               </>
             )}
